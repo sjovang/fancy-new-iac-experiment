@@ -1,0 +1,32 @@
+kind: AzureTemplate
+apiVersion: iac.experiment/v1alpha1
+metadata:
+  name: lb
+spec:
+  outputs:
+    backendPoolId: /subscriptions/<sub>/resourceGroups/${values.resourceGroup}/providers/Microsoft.Network/loadBalancers/${values.name}-lb/backendAddressPools/backendpool
+  resources:
+    - type: Microsoft.Network/loadBalancers@2023-09-01
+      name: ${values.name}-lb
+      location: ${values.location}
+      properties:
+        frontendIPConfigurations:
+          - name: public-frontend
+            properties:
+              publicIPAddress:
+                id: ${values.publicIpId}
+        backendAddressPools:
+          - name: backendpool
+        probes:
+          - name: tcp80
+            properties:
+              protocol: Tcp
+              port: 80
+        loadBalancingRules:
+          - name: http
+            properties:
+              protocol: Tcp
+              frontendPort: 80
+              backendPort: 80
+              backendAddressPool:
+                id: ${outputs.backendPoolId}

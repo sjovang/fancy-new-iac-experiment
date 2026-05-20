@@ -1,0 +1,10 @@
+apiVersion: iac.experiment/v1alpha1
+kind: AzureSimpleApp
+metadata:
+  name: expapp-dev
+spec:
+  name: expapp-dev
+  location: westeurope
+  resourceGroup: rg-expapp-dev
+  adminUsername: azureuser
+  vmSize: Standard_B2s

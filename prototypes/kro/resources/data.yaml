@@ -1,0 +1,29 @@
+kind: AzureTemplate
+apiVersion: iac.experiment/v1alpha1
+metadata:
+  name: data
+spec:
+  outputs:
+    postgresServerName: ${values.name}-pg
+    postgresFqdn: ${values.name}-pg.postgres.database.azure.com
+    storageAccountName: ${values.name}st
+  resources:
+    - type: Microsoft.DBforPostgreSQL/flexibleServers@2023-06-01-preview
+      name: ${values.name}-pg
+      location: ${values.location}
+      properties:
+        delegatedSubnetResourceId: ${values.dataSubnetId}
+        network:
+          publicNetworkAccess: Disabled
+      identity:
+        type: UserAssigned
+        userAssignedIdentities:
+          ${values.managedIdentityId}: {}
+    - type: Microsoft.DBforPostgreSQL/flexibleServers/databases@2023-06-01-preview
+      name: ${values.name}-pg/appdb
+    - type: Microsoft.Storage/storageAccounts@2023-05-01
+      name: ${outputs.storageAccountName}
+      location: ${values.location}
+      kind: StorageV2
+      sku:
+        name: Standard_LRS

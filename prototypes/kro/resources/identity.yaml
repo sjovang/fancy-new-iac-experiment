@@ -1,0 +1,18 @@
+kind: AzureTemplate
+apiVersion: iac.experiment/v1alpha1
+metadata:
+  name: identity
+spec:
+  outputs:
+    id: /subscriptions/<sub>/resourceGroups/${values.resourceGroup}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${values.name}-uami
+    principalId: <resolved-at-runtime>
+  resources:
+    - type: Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31
+      name: ${values.name}-uami
+      location: ${values.location}
+    - type: Microsoft.Authorization/roleAssignments@2022-04-01
+      name: ${values.name}-uami-rg-contributor
+      properties:
+        principalType: ServicePrincipal
+        roleDefinitionId: /subscriptions/<sub>/providers/Microsoft.Authorization/roleDefinitions/<contributor-role-id>
+        principalId: ${outputs.principalId}

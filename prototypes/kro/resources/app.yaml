@@ -1,0 +1,35 @@
+kind: AzureTemplate
+apiVersion: iac.experiment/v1alpha1
+metadata:
+  name: app
+spec:
+  outputs:
+    appServicePlanName: ${values.name}-asp
+    appServiceName: ${values.name}-frontend
+  resources:
+    - type: Microsoft.Web/serverfarms@2023-01-01
+      name: ${values.name}-asp
+      location: ${values.location}
+      kind: linux
+      sku:
+        name: P1v3
+      properties:
+        reserved: true
+    - type: Microsoft.Web/sites@2023-01-01
+      name: ${values.name}-frontend
+      location: ${values.location}
+      kind: app,linux
+      properties:
+        serverFarmId: /subscriptions/<sub>/resourceGroups/${values.resourceGroup}/providers/Microsoft.Web/serverfarms/${values.name}-asp
+        virtualNetworkSubnetId: ${values.frontendSubnetId}
+        siteConfig:
+          linuxFxVersion: DOTNETCORE|8.0
+          appSettings:
+            - name: DATABASE_HOST
+              value: ${values.postgresFqdn}
+            - name: STORAGE_ACCOUNT
+              value: ${values.storageAccountName}
+      identity:
+        type: UserAssigned
+        userAssignedIdentities:
+          ${values.managedIdentityId}: {}

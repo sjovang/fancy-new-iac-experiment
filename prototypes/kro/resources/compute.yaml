@@ -1,0 +1,50 @@
+kind: AzureTemplate
+apiVersion: iac.experiment/v1alpha1
+metadata:
+  name: compute
+spec:
+  outputs:
+    availabilitySetName: ${values.name}-aset
+    vmNames:
+      - ${values.name}-vm0
+      - ${values.name}-vm1
+  resources:
+    - type: Microsoft.Compute/availabilitySets@2023-09-01
+      name: ${values.name}-aset
+      location: ${values.location}
+    - type: Microsoft.Network/networkInterfaces@2023-09-01
+      name: ${values.name}-vm0-nic
+      location: ${values.location}
+      properties:
+        ipConfigurations:
+          - name: ipconfig1
+            properties:
+              subnet:
+                id: ${values.backendSubnetId}
+              loadBalancerBackendAddressPools:
+                - id: ${values.backendPoolId}
+    - type: Microsoft.Network/networkInterfaces@2023-09-01
+      name: ${values.name}-vm1-nic
+      location: ${values.location}
+      properties:
+        ipConfigurations:
+          - name: ipconfig1
+            properties:
+              subnet:
+                id: ${values.backendSubnetId}
+              loadBalancerBackendAddressPools:
+                - id: ${values.backendPoolId}
+    - type: Microsoft.Compute/virtualMachines@2023-09-01
+      name: ${values.name}-vm0
+      location: ${values.location}
+      identity:
+        type: UserAssigned
+        userAssignedIdentities:
+          ${values.managedIdentityId}: {}
+    - type: Microsoft.Compute/virtualMachines@2023-09-01
+      name: ${values.name}-vm1
+      location: ${values.location}
+      identity:
+        type: UserAssigned
+        userAssignedIdentities:
+          ${values.managedIdentityId}: {}

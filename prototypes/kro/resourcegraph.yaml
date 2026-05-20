@@ -1,0 +1,81 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: simple-azure-app
+spec:
+  schema:
+    apiVersion: iac.experiment/v1alpha1
+    kind: AzureSimpleApp
+    spec:
+      name: string
+      location: string
+      resourceGroup: string
+      adminUsername: string
+      vmSize: string
+  resources:
+    - id: network
+      templateRef: ./resources/network.yaml
+      values:
+        name: ${schema.spec.name}
+        location: ${schema.spec.location}
+        resourceGroup: ${schema.spec.resourceGroup}
+
+    - id: identity
+      templateRef: ./resources/identity.yaml
+      values:
+        name: ${schema.spec.name}
+        location: ${schema.spec.location}
+        resourceGroup: ${schema.spec.resourceGroup}
+
+    - id: lb
+      templateRef: ./resources/lb.yaml
+      dependsOn:
+        - network
+      values:
+        name: ${schema.spec.name}
+        location: ${schema.spec.location}
+        resourceGroup: ${schema.spec.resourceGroup}
+        publicIpId: ${resources.network.outputs.lbPublicIpId}
+
+    - id: compute
+      templateRef: ./resources/compute.yaml
+      dependsOn:
+        - network
+        - identity
+        - lb
+      values:
+        name: ${schema.spec.name}
+        location: ${schema.spec.location}
+        resourceGroup: ${schema.spec.resourceGroup}
+        adminUsername: ${schema.spec.adminUsername}
+        vmSize: ${schema.spec.vmSize}
+        backendSubnetId: ${resources.network.outputs.backendSubnetId}
+        backendPoolId: ${resources.lb.outputs.backendPoolId}
+        managedIdentityId: ${resources.identity.outputs.id}
+
+    - id: data
+      templateRef: ./resources/data.yaml
+      dependsOn:
+        - network
+        - identity
+      values:
+        name: ${schema.spec.name}
+        location: ${schema.spec.location}
+        resourceGroup: ${schema.spec.resourceGroup}
+        dataSubnetId: ${resources.network.outputs.dataSubnetId}
+        managedIdentityId: ${resources.identity.outputs.id}
+
+    - id: app
+      templateRef: ./resources/app.yaml
+      dependsOn:
+        - network
+        - identity
+        - data
+      values:
+        name: ${schema.spec.name}
+        location: ${schema.spec.location}
+        resourceGroup: ${schema.spec.resourceGroup}
+        frontendSubnetId: ${resources.network.outputs.frontendSubnetId}
+        managedIdentityId: ${resources.identity.outputs.id}
+        postgresFqdn: ${resources.data.outputs.postgresFqdn}
+        storageAccountName: ${resources.data.outputs.storageAccountName}

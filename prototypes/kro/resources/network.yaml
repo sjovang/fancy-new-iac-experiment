@@ -1,0 +1,21 @@
+kind: AzureTemplate
+apiVersion: iac.experiment/v1alpha1
+metadata:
+  name: network
+spec:
+  outputs:
+    vnetName: ${values.name}-vnet
+    frontendSubnetId: /subscriptions/<sub>/resourceGroups/${values.resourceGroup}/providers/Microsoft.Network/virtualNetworks/${values.name}-vnet/subnets/frontend
+    backendSubnetId: /subscriptions/<sub>/resourceGroups/${values.resourceGroup}/providers/Microsoft.Network/virtualNetworks/${values.name}-vnet/subnets/backend
+    dataSubnetId: /subscriptions/<sub>/resourceGroups/${values.resourceGroup}/providers/Microsoft.Network/virtualNetworks/${values.name}-vnet/subnets/data
+    lbPublicIpId: /subscriptions/<sub>/resourceGroups/${values.resourceGroup}/providers/Microsoft.Network/publicIPAddresses/${values.name}-lb-pip
+  resources:
+    - type: Microsoft.Network/virtualNetworks@2023-09-01
+      name: ${values.name}-vnet
+      location: ${values.location}
+    - type: Microsoft.Network/networkSecurityGroups@2023-09-01
+      name: ${values.name}-nsg
+      location: ${values.location}
+    - type: Microsoft.Network/publicIPAddresses@2023-09-01
+      name: ${values.name}-lb-pip
+      location: ${values.location}
