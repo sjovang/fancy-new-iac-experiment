@@ -4,7 +4,7 @@
 - **Date:** 2026-05-19
 - **Deciders:** tjs
 - **Related traits:** #1 (continuous reconciliation), #2 (dependency DAG), #4 (explicit lifecycle behavior), #5 (declarative-first authoring), #6 (cloud-agnostic schema consumption)
-- **Related ADRs:** [0001](../accepted/0001-execution-surface.md), [0003](../accepted/0003-kro-authoring-surface.md), [0004](./0004-schema-ingestion.md)
+- **Related ADRs:** [0001](../accepted/0001-execution-surface.md), [0003](../accepted/0003-kro-authoring-surface.md), [0004](../accepted/0004-schema-ingestion.md)
 
 ## Context
 
