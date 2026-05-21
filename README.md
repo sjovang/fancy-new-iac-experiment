@@ -1,8 +1,8 @@
-# Hoopono
+# Fakalelei
 
 *The tool that fixes what others got wrong.*
 
-Hoopono (Hawaiian: "to make right") is an experimental infrastructure-as-code platform designed to reconcile the gaps left by existing IaC tools. It approaches infrastructure through a **reconciliation-first**, **dependency-aware**, and **cloud-agnostic** lens—enabling declarative, deterministic authoring without sacrificing the flexibility to model complex, multi-provider environments.
+Fakalelei (Tongan: "to fix, reconcile, make amends"; pronounced *fah-kah-leh-LAY*) is an experimental infrastructure-as-code platform designed to reconcile the gaps left by existing IaC tools. It approaches infrastructure through a **reconciliation-first**, **dependency-aware**, and **cloud-agnostic** lens—enabling declarative, deterministic authoring without sacrificing the flexibility to model complex, multi-provider environments.
 
 ## Key Principles
 
