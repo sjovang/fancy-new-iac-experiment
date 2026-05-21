@@ -524,6 +524,22 @@ A realistic timeline for a single experienced engineer to reach production quali
 - Exact Graph entity counts (~900–1,000 v1.0) were estimated from CSDL file size and PowerShell SDK module structure; precise counts require parsing `schemas/v1.0-Prod.csdl`.
 - The OData `$batch` and the multi-cloud (sovereign) CSDL variants were not investigated in implementation depth.
 
+### §11 additions
+- Crossplane managed-resource management policies (`spec.managementPolicies` array, values `Observe`/`Create`/`Update`/`Delete`/`LateInitialize`): <https://docs.crossplane.io/latest/managed-resources/managed-resources/> (see "Management policy")
+- Crossplane design doc for observe-only resources (origin of the `managementPolicies` model): <https://github.com/crossplane/crossplane/blob/main/design/design-doc-observe-only-resources.md>
+- Azure Service Operator annotations including `serviceoperator.azure.com/reconcile-policy` (values `manage`, `detach-on-delete`, `skip`): <https://azure.github.io/azure-service-operator/guide/annotations/>
+- Terraform `lifecycle` meta-argument (`prevent_destroy`, `ignore_changes`, `create_before_destroy`, `replace_triggered_by`): <https://developer.hashicorp.com/terraform/language/meta-arguments/lifecycle>
+- kro overview and instance/RGD model (CEL expressions on resource templates): <https://kro.run/docs/overview> and <https://kro.run/docs/concepts/instances>
+- OData v4 `Org.OData.Capabilities.V1` vocabulary (`InsertRestrictions`, `UpdateRestrictions`, `DeleteRestrictions`, navigation `ContainsTarget`): <https://github.com/oasis-tcs/odata-vocabularies/blob/main/vocabularies/Org.OData.Capabilities.V1.md>
+- Microsoft Graph long-running actions / 202 + `Location` polling: <https://learn.microsoft.com/en-us/graph/long-running-actions-overview>
+- Microsoft Graph `addPassword` (one-shot secret return; motivates `responseCapture`): <https://learn.microsoft.com/en-us/graph/api/application-addpassword>
+- Authentication Methods Policy singleton (used in §11.6.2): <https://learn.microsoft.com/en-us/graph/api/resources/authenticationmethodspolicy>
+- PIM for Groups `assignmentScheduleRequests` endpoint (used in §11.6.3): <https://learn.microsoft.com/en-us/graph/api/privilegedaccessgroup-post-assignmentschedulerequests>
+- Group members `$ref` collection (used in §11.6.4): <https://learn.microsoft.com/en-us/graph/api/group-post-members>
+- Local: canonical IR + transform/override model (accepted): `docs/decisions/accepted/0004-schema-ingestion.md`
+- Local: provider operation contract (`Observe`/`Create`/`Update`/`Delete`/`InvokeAction`/`GetOperationStatus`): `docs/provider-operation-model.md`
+- Local: sibling research on non-HTTP-verb CRUD semantics (PIM `action`/`type`): `docs/research/some-api-s-does-not-use-http-methods-for.md`
+
 ---
 
 ## 10. Surfacing Helpful Feedback: Which Archetype for a Given Endpoint?
@@ -619,3 +635,293 @@ The highest-leverage combination is **Option A + Option C**:
 - Structured condition reasons with remediation hints for errors that still reach the reconciler
 
 If a single-CRD model (Option B) is adopted, the `mode: auto` field with CSDL-backed classification subsumes Option A and is the cleanest long-term UX — it eliminates the archetype-selection problem entirely for the majority of users. The four-kind model trades UX simplicity for schema explicitness and is only preferable if strong typing of each archetype is a design goal.
+
+---
+
+## 11. Flexible per-resource operation model
+
+This section is an *extension* of §6.1 and §10.3 rather than a replacement. The executive recommendation in §9 stands; what follows refines the internal shape of the four archetypes into a single, more flexible primitive: a per-resource-type **operation profile**, paired with a per-instance **`managementPolicies`** allow-list. The intent is to give end users (and the codegen) a declarative way to express CRUD + action semantics that fits the Graph quirks already catalogued in §2.2, without leaking transport details into authoring.
+
+### 11.1 Why this is needed
+
+§6.1 introduced four CRD kinds (`GraphResource`, `GraphUpdateResource`, `GraphReferenceCollection`, `GraphAction`). §10.3 Option B observed that those four kinds are largely an artefact of the underlying API quirks and can collapse into a single CRD with a `mode` field. Both formulations are different surface presentations of the same underlying object: a description of *how each lifecycle slot is realised as a transport call*.
+
+The conversation around composing Graph resources with kro [E12] surfaced a second, orthogonal axis: even when a resource type *can* do full CRUD, individual instances often need to be pinned to a subset (observe-only, no-delete, late-init-only). Crossplane calls this `managementPolicies`; ASO exposes it as the `serviceoperator.azure.com/reconcile-policy` annotation; Terraform expresses fragments of it via `lifecycle { prevent_destroy, ignore_changes }`. None of these is wired into the four-archetype design as it stands.
+
+Splitting these two axes — *what the resource type supports* (the operation profile) and *what a specific instance is allowed to do* (the management policy) — produces a model that:
+
+- absorbs every quirk in §2.2 without per-resource controller branching,
+- subsumes the four kinds from §6.1 as four canned profiles,
+- gives end users the same instance-level controls Crossplane and ASO users already expect, and
+- composes cleanly with the kro authoring surface accepted in [E9] without forcing kro to understand transport.
+
+### 11.2 The operation profile schema
+
+An operation profile describes, for one Graph resource type, the transport-level recipe for each of five lifecycle slots: `observe`, `create`, `update`, `delete`, and zero or more named `actions`. Each slot carries enough metadata for the generic reconciler to execute it without resource-specific code.
+
+```yaml
+operationProfile:
+  apiVersion: v1.0           # or beta; matches §2.1 metadata channel
+  consistency:
+    writeWaitPolicy: poll-until-observed   # see §2.2 eventual consistency
+    consistencyHeader: eventual             # see §2.2 advanced queries
+  throttle:
+    retryAfterHeader: Retry-After           # see §2.2 throttling
+    perTenantBucketHint: low
+
+  observe:
+    method: GET
+    path: /groups/{externalId}
+    pagination: odataNextLink               # @odata.nextLink for collections
+    notFoundIs: deleted                     # 404 → reconcile as drift
+
+  create:
+    method: POST
+    path: /groups
+    bodyTemplate: ${spec.body}
+    responseCapture:
+      externalId: $.id
+    async:
+      mode: sync                            # or: location-header-lro
+    onConflict: adoptByKeyField             # see §5.4 adopt-or-create
+
+  update:
+    method: PATCH
+    path: /groups/{externalId}
+    bodyTemplate: ${diff(spec.body, status.observed)}
+    ifMatchFrom: status.etag                # optional optimistic concurrency
+
+  delete:
+    method: DELETE
+    path: /groups/{externalId}
+    softDelete:
+      kind: two-phase                       # see §2.2 soft-delete
+      purgePath: /directory/deletedItems/{externalId}
+      purgeWhen: spec.deletionPolicy == "purge"
+
+  actions:
+    - name: addPassword
+      method: POST
+      path: /applications/{externalId}/addPassword
+      bodyTemplate: ${spec.passwordCredential}
+      responseCapture:
+        secretRef: $.secretText             # one-shot read; see §5.5
+```
+
+Every field listed above maps to a quirk already documented in §2.2 or earlier. The table below shows the mapping explicitly so that adding a new quirk to §2.2 in the future has an obvious landing slot in the profile schema rather than a new code path in the controller.
+
+| §2.2 quirk | Profile expression |
+|---|---|
+| Singleton (no POST/DELETE) | `create.method: PATCH` against the singleton path, treated as upsert-no-op when already present; `delete: { method: noop, warn: true }` |
+| Action endpoint (POST RPC) | Entry under `actions[]`; never invoked by reconciliation, only by user-triggered subresource or sibling CR |
+| OData function (GET RPC) | Same as actions but `method: GET`; result captured into `status` |
+| `$ref` reference collection | `create.method: POST` to `…/{nav}/$ref` with `@odata.id` body; `delete.method: DELETE` against `…/{nav}/{id}/$ref`; `observe` paginated GET on the navigation property |
+| Polymorphic types (`@odata.type`) | `bodyTemplate` always emits the discriminator; `observe` records it into `status.kind` so updates round-trip |
+| LRO (202 + Location) | `async.mode: location-header-lro`; resume token stored as annotation per §5.2 |
+| Eventual consistency | `consistency.writeWaitPolicy: poll-until-observed` plus `consistencyHeader: eventual` on follow-up reads |
+| Application/ServicePrincipal split | Two profiles that share a `linkedProfile` reference; the SP profile's `create.onMissingLink` triggers the Application profile first |
+| Soft-delete + restore | `delete.softDelete.kind: two-phase` with `purgePath` and a policy gate |
+| Throttling + `Retry-After` | `throttle` block, honoured by the generic client; per-tenant bucket sized per §5 |
+
+The profile is intentionally declarative: there are no hooks, no scripts, and no per-resource Go callbacks. This is the same constraint trait #4 already imposes on the provider operation contract [E7][E8] and is the property that lets the generic reconciler handle any new Graph endpoint without a rebuild.
+
+### 11.3 Per-instance `managementPolicies`
+
+The operation profile says what a resource type *can* do. The CR `spec.managementPolicies` field says what the controller *should* do on this particular instance. The effective allowed set is the intersection:
+
+```
+effective(slot) = (slot in profile.supports) AND (slot in spec.managementPolicies)
+```
+
+```yaml
+apiVersion: graph.example.com/v1
+kind: Group
+spec:
+  managementPolicies: ["Observe", "Create", "Update", "LateInitialize"]
+  body: { displayName: "Platform Engineering", mailEnabled: false, securityEnabled: true }
+```
+
+Omitting the field defaults to the full set the profile supports (current ASO behaviour). `LateInitialize` follows the Crossplane semantic: copy server-defaulted fields into `spec` once after the first successful observe, then never again.
+
+The model deliberately reuses prior art rather than inventing a new vocabulary:
+
+| Project | Field | Granularity | Notes |
+|---|---|---|---|
+| Crossplane managed resources | `spec.managementPolicies: [Observe, Create, Update, Delete, LateInitialize]` | Per instance, declarative array | Default `[*]`; `[Observe]` makes the resource observe-only; combinations supported |
+| Azure Service Operator | `serviceoperator.azure.com/reconcile-policy` annotation | Per instance, enumerated string | Values include `manage`, `detach-on-delete`, `skip` — coarser than Crossplane but covers the most common cases |
+| Terraform | `lifecycle { prevent_destroy, ignore_changes, create_before_destroy, replace_triggered_by }` | Per resource block, declarative | Fragmented across multiple keys; no explicit observe-only mode |
+
+For this design we recommend the Crossplane array form because it is the most expressive of the three and composes naturally with the profile (intersection is well-defined per slot). The ASO annotation values can be expressed as presets — `manage` = `[Observe, Create, Update, Delete, LateInitialize]`, `detach-on-delete` = `[Observe, Create, Update, LateInitialize]`, `skip` = `[]` — and surfaced as a `mode` shortcut for users who prefer the annotation idiom.
+
+If a user requests a slot the profile does not support (e.g. `Delete` on a singleton), the admission webhook from §10.2 rejects the manifest with a remediation hint pointing at the profile's `supports` set; this is the same fail-fast mechanism, applied to a different axis.
+
+### 11.4 Collapsing the four archetypes
+
+With the profile model in place, §6.1's four CRDs are best understood as four *preset profiles* rather than four schemas:
+
+| §6.1 kind | Equivalent preset profile |
+|---|---|
+| `GraphResource` | All five slots active; `create` = POST, `update` = PATCH, `delete` = DELETE, `observe` = GET |
+| `GraphUpdateResource` | `create.method: PATCH` (upsert-no-op), `delete: { method: noop }`, `update` = PATCH, `observe` = GET; `actions: []` |
+| `GraphReferenceCollection` | `create/delete` against `…/$ref`; `update` decomposes into add/remove diff; `observe` paginated GET on the navigation property |
+| `GraphAction` | All CRUD slots `noop`; one entry in `actions[]`; status carries last-invocation result |
+
+This is the runtime form of §10.3 Option B. The user-facing surface can still be either:
+
+- **Four typed CRDs** that internally instantiate the matching preset (good for OpenAPI strictness, schema documentation, kubectl explain UX);
+- **One generic `GraphResource` CRD** with `spec.profileRef` (string preset name, e.g. `"reference-collection"`) or inline profile override (good for the long tail, mirrors `terraform-provider-azapi`).
+
+Both can coexist, and a small number of high-value typed CRDs (the ones listed in §6.2) can ship alongside the generic CRD without duplicating logic — they are thin wrappers that fix `profileRef` and tighten the body schema.
+
+### 11.5 Where the profile comes from
+
+Three sources, in order of preference:
+
+1. **Auto-derived from CSDL/OpenAPI by the generator.** The same signals listed in §10.1 (capability annotations, `EntityContainer` membership, bound actions and functions) determine every field of the profile mechanically. `InsertRestrictions/Insertable=false` ⇒ `create` becomes upsert-no-op; `<Action Name="addPassword" IsBound="true">` ⇒ a new `actions[]` entry; navigation property with `ContainsTarget="false"` ⇒ `$ref` collection shape. This produces a baseline profile for every endpoint in v1.0 and beta without human input, and it is the canonical IR contract recorded in [E10] (`docs/decisions/accepted/0004-schema-ingestion.md`).
+2. **Curated overrides for known-broken or ambiguous endpoints.** A small, version-controlled table inside the operator image patches the generated profile for endpoints where the CSDL is wrong, missing capability annotations, or describes a shape the runtime cannot honour. This is the same kind of override surface called out as a follow-up in [E10] and the open action-modeling question in [E11].
+3. **User-supplied override on the CR spec.** An escape hatch for endpoints that ship before the generator catches up, or for tenant-specific extensions. This is gated by a cluster-scoped admin opt-in (`GraphOperatorConfig.allowInlineProfileOverrides: true`) because, as §11.8 notes, it is a privilege-escalation vector if left open by default.
+
+### 11.6 Worked examples
+
+#### 11.6.1 Normal entity — `Group` with full CRUD
+
+```yaml
+apiVersion: graph.example.com/v1
+kind: Group
+metadata: { name: platform-eng }
+spec:
+  # managementPolicies omitted → defaults to profile.supports
+  body:
+    displayName: Platform Engineering
+    mailEnabled: false
+    mailNickname: platform-eng
+    securityEnabled: true
+# Effective profile (auto-derived, shown for clarity, not normally written by user):
+# create:  POST   /groups
+# observe: GET    /groups/{id}
+# update:  PATCH  /groups/{id}
+# delete:  DELETE /groups/{id}  (soft-delete: two-phase, restore-window 30d)
+```
+
+#### 11.6.2 Singleton with restricted policy — `authenticationMethodsPolicy`
+
+```yaml
+apiVersion: graph.example.com/v1
+kind: AuthenticationMethodsPolicy
+metadata: { name: tenant-default }
+spec:
+  managementPolicies: ["Observe", "Update"]   # explicit; refuse Create/Delete even if profile allowed them
+  body:
+    registrationEnforcement:
+      authenticationMethodsRegistrationCampaign:
+        state: enabled
+        snoozeDurationInDays: 1
+# Profile (preset = "singleton"):
+# create:  PATCH /policies/authenticationMethodsPolicy   (upsert-no-op)
+# observe: GET   /policies/authenticationMethodsPolicy
+# update:  PATCH /policies/authenticationMethodsPolicy
+# delete:  noop  (warn: "singleton; nothing to delete")
+```
+
+The `managementPolicies` array makes the operator-side guarantee explicit even though the profile's `create` and `delete` are already inert; this protects the resource from a future profile change that adds destructive semantics.
+
+#### 11.6.3 PIM ticket — same endpoint, different `action` field
+
+This is the case from the sibling research file (`some-api-s-does-not-use-http-methods-for.md`), expressed in the profile schema:
+
+```yaml
+apiVersion: graph.example.com/v1
+kind: PimGroupAssignmentRequest
+metadata: { name: oncall-prod }
+spec:
+  managementPolicies: ["Observe", "Create", "Update", "Delete"]
+  body:
+    principalId: 11111111-1111-1111-1111-111111111111
+    groupId:     22222222-2222-2222-2222-222222222222
+    accessId:    member
+    scheduleInfo: { startDateTime: "2026-06-01T00:00:00Z", expiration: { type: noExpiration } }
+    justification: "On-call rotation"
+# Profile (preset = "ticket-action-field"):
+# create: POST /identityGovernance/privilegedAccess/group/assignmentScheduleRequests
+#         bodyTemplate.action = adminAssign
+# update: POST /identityGovernance/privilegedAccess/group/assignmentScheduleRequests
+#         bodyTemplate.action = adminUpdate
+# delete: POST /identityGovernance/privilegedAccess/group/assignmentScheduleRequests
+#         bodyTemplate.action = adminRemove
+# observe: GET /identityGovernance/privilegedAccess/group/assignmentScheduleRequests/{id}
+# actions:
+#   - name: selfActivate
+#     method: POST
+#     path:   /identityGovernance/privilegedAccess/group/assignmentScheduleRequests
+#     bodyTemplate.action = selfActivate
+```
+
+This is the example that motivates separating the profile from HTTP-verb assumptions: the three CRUD slots resolve to the same `POST` against the same path, differing only in the rendered request body. No per-resource controller code is required.
+
+#### 11.6.4 `$ref` collection — group members
+
+```yaml
+apiVersion: graph.example.com/v1
+kind: GroupMembers
+metadata: { name: platform-eng-members }
+spec:
+  groupRef: { name: platform-eng }
+  members:
+    - { kind: User,             id: aaaa1111-... }
+    - { kind: ServicePrincipal, id: bbbb2222-... }
+# Profile (preset = "reference-collection"):
+# observe: GET /groups/{groupId}/members
+#          pagination: @odata.nextLink
+# create:  POST /groups/{groupId}/members/$ref
+#          bodyTemplate: { "@odata.id": "https://graph.microsoft.com/v1.0/directoryObjects/{id}" }
+# delete:  DELETE /groups/{groupId}/members/{id}/$ref
+# update:  decomposes into add/remove diff against status.observedMembers
+```
+
+The reconciler diffs `spec.members` against `status.observedMembers` and issues batched `POST …/$ref` and `DELETE …/$ref` calls; the profile does not need to know about diffing — that is a property of the `reference-collection` preset bound to this profile shape.
+
+### 11.7 Composition with kro
+
+The profile is invisible at the kro authoring layer. End users writing a ResourceGraphDefinition see only the typed CRD (or the generic `GraphResource`) and its `spec.managementPolicies` field; the profile lives one layer down inside the operator, exactly as the kro design doc requires for provider-layer concerns [E13].
+
+The `managementPolicies` field, however, is fair game for RGD authors. A common request is to expose a single user-friendly `mode` string and translate it inside the RGD using kro's CEL surface:
+
+```yaml
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata: { name: managed-group }
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ManagedGroup
+    spec:
+      displayName: string
+      mode: string | enum=["readonly","managed","detach-on-delete"] | default="managed"
+  resources:
+    - id: group
+      template:
+        apiVersion: graph.example.com/v1
+        kind: Group
+        metadata: { name: ${schema.spec.displayName} }
+        spec:
+          body: { displayName: ${schema.spec.displayName}, securityEnabled: true, mailEnabled: false }
+          managementPolicies: ${
+            schema.spec.mode == "readonly"          ? ["Observe"] :
+            schema.spec.mode == "detach-on-delete"  ? ["Observe","Create","Update","LateInitialize"] :
+                                                       ["Observe","Create","Update","Delete","LateInitialize"]
+          }
+```
+
+This keeps the RGD declarative and gives platform teams a knob that maps onto Crossplane and ASO idioms without leaking transport details. It reuses exactly the CEL pattern kro already supports for `instance.spec` expressions on resource templates.
+
+### 11.8 Risks and open questions
+
+| Risk | Discussion |
+|---|---|
+| **Where does the profile live at runtime?** Three plausible homes: (a) compiled into the operator binary at codegen time (fast, but every Graph schema bump requires an operator release); (b) shipped as a `ConfigMap` reloaded on startup (decoupled, but the operator and the data can drift in production); (c) a `GraphResourceType` CRD (a CRD-of-CRDs) reconciled like any other resource (most flexible, but adds a bootstrap dependency). Recommendation: ship (a) as the default and (b) as an override; reserve (c) until multi-tenant deployments demand it. |
+| **Drift between operator version and live Graph API.** The CSDL the generator consumed at build time can diverge from `https://graph.microsoft.com/v1.0/$metadata` at any point. A reconciler that hits a 4xx because the path moved or a capability flipped must surface a structured condition (`reason: ProfileDrift`) rather than retry blindly. A periodic CSDL-fetch sidecar can compare live metadata to the embedded profile set and emit metrics; this is cheaper than full re-derivation. |
+| **User-supplied profiles as a privilege-escalation vector.** A malicious or careless user with `create` permission on `GraphResource` could point `delete.path` at `/directoryRoles/{id}/members/$ref/{ownerId}` and use the operator's app permissions to remove themselves from oversight. Inline profile overrides MUST be off by default, gated by a cluster-scoped flag, and ideally additionally constrained by an admission policy that whitelists path prefixes. The curated-override table from §11.5(2) is the safer mechanism for legitimate one-off patches. |
+| **Beta → v1.0 promotion.** When Graph promotes a resource from beta to v1.0, the path, body shape, and capability annotations may all change. The profile's `apiVersion` field pins the channel, but instances pinned to `beta` will keep using the old profile after promotion. A version-aliasing layer in the generator (`v1.0-or-beta-fallback`) handles the common case where the beta profile is forward-compatible; for the rest, an operator-emitted `Deprecated` condition with the promoted v1.0 path is the minimum acceptable migration aid. |
+| **Profile expressiveness ceiling.** The schema in §11.2 is deliberately small. Endpoints that need request signing, multi-step orchestration, or non-OData pagination will hit the ceiling. The escape hatch is the `actions[]` mechanism plus a sibling CR that drives the orchestration — not extending the profile vocabulary, because every new field becomes a new code path in every reconciler. |
+
+---
