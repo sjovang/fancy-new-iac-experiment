@@ -4,7 +4,7 @@
 - **Date:** 2026-05-19
 - **Deciders:** tjs
 - **Related traits:** #4 (operation control), #5 (declarative-first with rich constructs), #6 (schema-driven ergonomics)
-- **Related ADRs:** [0003](../accepted/0003-kro-authoring-surface.md), [0004](./0004-schema-ingestion.md)
+- **Related ADRs:** [0003](../accepted/0003-kro-authoring-surface.md), [0004](../accepted/0004-schema-ingestion.md)
 
 ## Context
 

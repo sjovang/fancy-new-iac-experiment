@@ -1,7 +1,7 @@
 # 0004. Schema ingestion for kro-oriented authoring
 
-- **Status:** Proposed
-- **Date:** 2026-05-19
+- **Status:** Accepted
+- **Date:** 2026-05-20
 - **Deciders:** tjs
 - **Related traits:** #1 (continuous reconciliation), #2 (dependency DAG), #3 (thin API layers), #4 (explicit operation control), #5 (declarative-first authoring), #6 (cloud-agnostic schema consumption)
 - **Related ADRs:** [0001](../accepted/0001-execution-surface.md), [0003](../accepted/0003-kro-authoring-surface.md)
@@ -40,17 +40,21 @@ The decision must preserve cloud-agnostic architecture while avoiding hand-maint
 
 ## Decision
 
-**Proposed direction: Option C, refined as _canonical IR -> typed kro-facing artifacts per resource_ (planning Option 1).**
+**Accepted: Option C, refined as _canonical IR -> typed kro-facing artifacts per resource_ (planning Option 1).**
 
 v0 baseline included in this ADR:
 
 - **Source scope:** OpenAPI 3.x primary; Swagger 2.x supported via deterministic normalization.
 - **Generation strategy:** typed kro-facing artifacts per resource from canonical IR (generic-only surface is not the v0 primary).
 - **Operation mapping:** lifecycle defaults are method-derived, but always materialized as explicit IR operation profiles.
+- **Endpoint ambiguity policy:** when lifecycle inference yields ambiguous endpoint candidates, planning hard-fails and requires an explicit override.
 - **Override policy:** explicit overrides for non-standard APIs with precedence:
   1. resource-level override,
   2. provider-profile override,
   3. method-derived default.
+- **IR compatibility policy:** canonical IR uses semantic versioning; runtime accepts same-major IR only in v0. Cross-major compatibility requires explicit adapters.
+- **Validation boundary policy:** validation is defense-in-depth across authoring, planning, and reconciliation, with each phase owning its primary diagnostics while allowing critical invariant checks to repeat.
+- **Bundle packaging/versioning policy:** generated bundles are runtime-pinned and must declare explicit runtime compatibility metadata. Incompatible bundles are rejected at load time.
 
 ### Canonical IR contract (v0 minimum)
 
@@ -79,7 +83,7 @@ Out of scope:
 
 ## Invariant alignment
 
-This proposal preserves the five design invariants in `docs/traits-spec.md`:
+This decision preserves the five design invariants in `docs/traits-spec.md`:
 
 1. **Reconciliation-first:** generated artifacts retain explicit desired/observed modeling and operation profiles for repeated convergence loops.
 2. **DAG-preserving:** IR carries dependency metadata for deterministic graph planning and cycle-safe ordering.
@@ -87,12 +91,22 @@ This proposal preserves the five design invariants in `docs/traits-spec.md`:
 4. **Declarative-first authoring:** users primarily consume typed declarative artifacts; overrides stay declarative and data-driven.
 5. **Cloud-agnostic core:** normalization and IR are provider-neutral, with provider-specific behavior handled through declared overrides.
 
-## Explicit unresolved decisions (reason ADR remains Proposed)
+## Resolved decision details
 
-1. Exact IR schema versioning and compatibility policy across generator releases.
-2. Ambiguous endpoint resolution rules when HTTP method heuristics are insufficient (e.g., multiple POST endpoints with distinct lifecycle meanings).
-3. Validation boundary details between authoring-time, planning-time, and reconcile-time feedback for generated artifacts.
-4. Packaging/versioning contract for generated artifact bundles consumed by kro-oriented authoring.
+The following items were explicitly resolved to move this ADR to `Accepted`:
+
+1. **IR schema versioning/compatibility**
+   - Canonical IR uses semantic versioning.
+   - Runtime accepts same-major IR only in v0.
+   - Cross-major support is not implicit; it requires explicit adapter/migration logic.
+2. **Ambiguous lifecycle endpoint mapping**
+   - Heuristic ambiguity is treated as a hard planning error.
+   - Explicit overrides are required to disambiguate lifecycle operations.
+3. **Validation boundaries**
+   - Primary ownership is phase-based (authoring/planning/reconcile), but critical checks can repeat across phases to reduce unsafe drift.
+4. **Generated bundle versioning**
+   - Bundles must declare explicit runtime compatibility metadata.
+   - Loader behavior is strict: incompatible bundles fail fast instead of best-effort loading.
 
 ## Consequences
 
@@ -115,4 +129,5 @@ This proposal preserves the five design invariants in `docs/traits-spec.md`:
 - `docs/traits-spec.md`
 - `docs/research/implementation.md`
 - `docs/research/usability.md`
+- `docs/research/adr-0004-decision1-api-versioning-matrix.md`
 - kro docs: <https://kro.run/docs/overview/>

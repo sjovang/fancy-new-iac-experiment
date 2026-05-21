@@ -38,7 +38,7 @@ ADRs are organized by lifecycle/status value:
 | [0001](./accepted/0001-execution-surface.md) | Execution surface (K8s-native vs standalone reconciler) | Accepted |
 | [0002](./superseded/0002-authoring-language.md) | Authoring language / surface | Superseded by 0003 |
 | [0003](./accepted/0003-kro-authoring-surface.md) | Authoring surface pivot to kro | Accepted |
-| [0004](./proposed/0004-schema-ingestion.md) | Schema ingestion for kro-oriented authoring | Proposed |
+| [0004](./accepted/0004-schema-ingestion.md) | Schema ingestion for kro-oriented authoring | Accepted |
 | [0005](./proposed/0005-resource-identity-rules.md) | Resource identity and stability rules | Proposed |
 | [0006](./proposed/0006-plan-status-projection.md) | Plan and status projection model | Proposed |
 | [0007](./proposed/0007-transform-extension-model.md) | Transform and extension model | Proposed |
