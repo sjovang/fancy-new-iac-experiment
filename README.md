@@ -1,8 +1,8 @@
-# Fakalelei
+# Uhlelo
 
 *The tool that fixes what others got wrong.*
 
-Fakalelei (Tongan: "to fix, reconcile, make amends"; pronounced *fah-kah-leh-LAY*) is an experimental infrastructure-as-code platform designed to reconcile the gaps left by existing IaC tools. It approaches infrastructure through a **reconciliation-first**, **dependency-aware**, and **cloud-agnostic** lens—enabling declarative, deterministic authoring without sacrificing the flexibility to model complex, multi-provider environments.
+Uhlelo (Zulu: "arrangement, order, system"; pronounced *oo-HLEH-lo*) is an experimental infrastructure-as-code platform designed to reconcile the gaps left by existing IaC tools. It approaches infrastructure through a **reconciliation-first**, **dependency-aware**, and **cloud-agnostic** lens—enabling declarative, deterministic authoring without sacrificing the flexibility to model complex, multi-provider environments.
 
 ## Key Principles
 
