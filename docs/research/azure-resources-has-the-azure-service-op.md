@@ -523,3 +523,99 @@ A realistic timeline for a single experienced engineer to reach production quali
 - `microsoft/terraform-provider-msgraph` source code was reasoned about via secondary sources (the `deploymenttheory/terraform-provider-microsoft365` comparison doc and Microsoft's release notes). The GitHub repo URL was not directly verified during research; the four-archetype description is consistent across sources but should be confirmed against the actual source before implementation.
 - Exact Graph entity counts (~900–1,000 v1.0) were estimated from CSDL file size and PowerShell SDK module structure; precise counts require parsing `schemas/v1.0-Prod.csdl`.
 - The OData `$batch` and the multi-cloud (sovereign) CSDL variants were not investigated in implementation depth.
+
+---
+
+## 10. Surfacing Helpful Feedback: Which Archetype for a Given Endpoint?
+
+A key UX failure in `terraform-provider-msgraph` is that users get no guidance on which resource type to use (`msgraph_resource` vs `msgraph_update_resource`, etc.) until `terraform apply` fails with a cryptic OData error. The same problem will exist for any multi-archetype operator design. This section describes how to solve it.
+
+### 10.1 The classification signals are already in the CSDL
+
+The `microsoftgraph/msgraph-metadata` CSDL encodes everything needed to classify any endpoint:
+
+| CSDL signal | Correct archetype |
+|---|---|
+| `<EntitySet>` in `EntityContainer` + `InsertRestrictions/Insertable=true` | `GraphResource` (full CRUD) |
+| `<Singleton>` in `EntityContainer` | `GraphUpdateResource` (PATCH-only, no-op delete) |
+| `<Action>` or `<Function>` bound to an entity | `GraphAction` |
+| Navigation property + `$ref` URL pattern | `GraphReferenceCollection` |
+| `<EntitySet>` + `InsertRestrictions/Insertable=false` | `GraphUpdateResource` |
+
+OData capability annotations make insertability explicit:
+```xml
+<Annotation Term="Org.OData.Capabilities.V1.InsertRestrictions">
+  <Record><PropertyValue Property="Insertable" Bool="false"/></Record>
+</Annotation>
+```
+
+### 10.2 Option A: Validating admission webhook (best UX — fails fast)
+
+A Kubernetes validating admission webhook queries the CSDL classification for `spec.url` at admission time and rejects the resource *before* any reconcile loop runs — with a human-readable message and a remediation hint:
+
+```
+Error: GraphResource is not valid for "/policies/authenticationMethodsPolicy".
+This endpoint is a singleton — it has no CREATE or DELETE operation.
+Use GraphUpdateResource instead.
+
+See: https://learn.microsoft.com/en-us/graph/api/resources/authenticationmethodspolicy
+```
+
+The webhook can classify `$ref` URL patterns and bound actions purely from path structure, without full CSDL parsing — covering the most common misuses at low cost.
+
+### 10.3 Option B: Single CRD with auto-classification (simplest user-facing model)
+
+Instead of four CRD kinds, expose **one** `GraphResource` CRD with:
+
+```yaml
+spec:
+  url: /policies/authenticationMethodsPolicy
+  mode: auto   # auto | crud | update | collection | action
+  body: ...
+```
+
+`mode: auto` (default) causes the operator to classify the endpoint from CSDL at admission/reconcile time, stores the result in `status.detectedMode`, and surfaces a condition if the user's explicit mode contradicts the detection:
+
+```yaml
+status:
+  conditions:
+  - type: Ready
+    status: "False"
+    reason: ModeMismatch
+    message: >
+      spec.mode is "crud" but "/policies/authenticationMethodsPolicy" is a
+      singleton (no INSERT). Set spec.mode: "update" or omit it for auto-detection.
+```
+
+This is the same reason `terraform-provider-azapi` is tolerable with a single `azapi_resource` — one resource type eliminates the "which archetype?" question for most users.
+
+### 10.4 Option C: Structured status conditions for runtime errors
+
+For errors that slip through (e.g., a 405 on POST to a singleton), map known Graph error codes and HTTP status codes to actionable condition messages rather than surfacing raw OData errors:
+
+```yaml
+status:
+  conditions:
+  - type: Ready
+    status: "False"
+    reason: WrongArchetype
+    message: >
+      POST to /policies/authenticationMethodsPolicy returned 405 Method Not Allowed.
+      This endpoint does not support resource creation.
+      Hint: use GraphUpdateResource, which manages fields on an existing singleton.
+```
+
+A lookup table of `(url pattern → archetype)` for the ~20 most common Entra singleton/action endpoints handles the majority of cases without CSDL parsing at runtime.
+
+### 10.5 Option D: kubectl plugin / local dry-run
+
+A `kubectl graph explain <url>` command that classifies an endpoint and prints the matching archetype, required permissions, and an example YAML manifest. Runs locally against the embedded CSDL — no cluster connection required. Surfaces the same information as the webhook before the user writes any YAML.
+
+### 10.6 Recommendation
+
+The highest-leverage combination is **Option A + Option C**:
+
+- Admission webhook for fail-fast feedback with a clear hint before any cloud call is made
+- Structured condition reasons with remediation hints for errors that still reach the reconciler
+
+If a single-CRD model (Option B) is adopted, the `mode: auto` field with CSDL-backed classification subsumes Option A and is the cleanest long-term UX — it eliminates the archetype-selection problem entirely for the majority of users. The four-kind model trades UX simplicity for schema explicitness and is only preferable if strong typing of each archetype is a design goal.
