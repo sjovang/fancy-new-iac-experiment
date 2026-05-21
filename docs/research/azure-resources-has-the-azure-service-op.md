@@ -540,6 +540,17 @@ A realistic timeline for a single experienced engineer to reach production quali
 - Local: provider operation contract (`Observe`/`Create`/`Update`/`Delete`/`InvokeAction`/`GetOperationStatus`): `docs/provider-operation-model.md`
 - Local: sibling research on non-HTTP-verb CRUD semantics (PIM `action`/`type`): `docs/research/some-api-s-does-not-use-http-methods-for.md`
 
+### §12 additions
+- Microsoft Graph permissions reference (per-permission Delegated vs Application support): <https://learn.microsoft.com/en-us/graph/permissions-reference>
+- Microsoft Graph permissions overview (concepts, scopes, consent): <https://learn.microsoft.com/en-us/graph/permissions-overview>
+- Microsoft Graph auth concepts (delegated vs app-only access): <https://learn.microsoft.com/en-us/graph/auth/auth-concepts>
+- Microsoft Graph error responses (including `Authorization_RequestDenied`): <https://learn.microsoft.com/en-us/graph/errors>
+- `microsoftgraph/microsoft-graph-docs-contrib` (per-endpoint Permissions tables; source for the curated delegated-only table): <https://github.com/microsoftgraph/microsoft-graph-docs-contrib>
+- Canonical `/me` endpoint family (delegated-only by construction): <https://learn.microsoft.com/en-us/graph/api/resources/user>
+- `user: sendMail` (representative Application-permission alternative cited in §12.5 rejection message): <https://learn.microsoft.com/en-us/graph/api/user-sendmail>
+- On-Behalf-Of flow (cited only to mark the broker option as out-of-scope per §12.8): <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-on-behalf-of-flow>
+- AKS Workload Identity (already cited in §5.3; reused as basis for the Application-only context in §12.4): <https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview>
+
 ---
 
 ## 10. Surfacing Helpful Feedback: Which Archetype for a Given Endpoint?
@@ -923,5 +934,169 @@ This keeps the RGD declarative and gives platform teams a knob that maps onto Cr
 | **User-supplied profiles as a privilege-escalation vector.** A malicious or careless user with `create` permission on `GraphResource` could point `delete.path` at `/directoryRoles/{id}/members/$ref/{ownerId}` and use the operator's app permissions to remove themselves from oversight. Inline profile overrides MUST be off by default, gated by a cluster-scoped flag, and ideally additionally constrained by an admission policy that whitelists path prefixes. The curated-override table from §11.5(2) is the safer mechanism for legitimate one-off patches. |
 | **Beta → v1.0 promotion.** When Graph promotes a resource from beta to v1.0, the path, body shape, and capability annotations may all change. The profile's `apiVersion` field pins the channel, but instances pinned to `beta` will keep using the old profile after promotion. A version-aliasing layer in the generator (`v1.0-or-beta-fallback`) handles the common case where the beta profile is forward-compatible; for the rest, an operator-emitted `Deprecated` condition with the promoted v1.0 path is the minimum acceptable migration aid. |
 | **Profile expressiveness ceiling.** The schema in §11.2 is deliberately small. Endpoints that need request signing, multi-step orchestration, or non-OData pagination will hit the ceiling. The escape hatch is the `actions[]` mechanism plus a sibling CR that drives the orchestration — not extending the profile vocabulary, because every new field becomes a new code path in every reconciler. |
+
+---
+
+## 12. Auth-context capability and delegated-only endpoints
+
+A category of Microsoft Graph endpoints accepts only **delegated** permissions — a token obtained on behalf of a signed-in user — and rejects **application** permissions issued under the client-credentials grant (the basis of workload identity, managed identity, and certificate-based service principals). Under the auth model recommended in §5.3, the operator runs with an application context and will receive `403 Authorization_RequestDenied` for every such endpoint, at reconcile time, with no preventative signal. This section describes how the operator surfaces that constraint *before* any cloud call is issued, and why the scope is deliberately limited to **hard-blocking** rather than introducing a delegated-token broker.
+
+### 12.1 The concrete failure mode
+
+A user installs the operator, configures it with AKS Workload Identity per §5.3, and applies:
+
+```yaml
+apiVersion: graph.example.com/v1
+kind: GraphResource
+spec:
+  url: /me/messages
+  body: { subject: "Test", body: { contentType: Text, content: "Hello" }, toRecipients: [{ emailAddress: { address: "ops@example.com" } }] }
+```
+
+The reconciler issues `POST https://graph.microsoft.com/v1.0/me/messages` with the workload-identity token. Graph responds:
+
+```
+HTTP/1.1 403 Forbidden
+{ "error": { "code": "Authorization_RequestDenied",
+             "message": "/me requests are not supported when using application permissions. ..." } }
+```
+
+The CR sits with `Ready=False, reason=ProviderError`, the message buried inside a generic OData wrapper. The user has no way to know — short of reading the Graph docs for every endpoint they manage — that `/me/*` is *structurally* unreachable from this operator's credential context, not a transient or permission-scope problem. The same pattern recurs for endpoints that require a signed-in user identity (e.g. self-service access-package requests, certain Teams chat-as-user operations, parts of PIM self-activation, some `reports/` endpoints).
+
+### 12.2 Where the delegated-only signal lives in Graph metadata
+
+The "delegated vs application" distinction is documented on a per-endpoint basis across three sources, none of which is a complete, structured feed:
+
+| Source | Form | Coverage | Usability |
+|---|---|---|---|
+| `microsoftgraph/microsoft-graph-docs-contrib` per-API markdown files | Free-text "Permissions" tables listing Delegated (work/school), Delegated (personal), Application | Effectively complete (every documented endpoint has one) | Unstructured markdown; rows like "Not supported" must be parsed to detect delegated-only |
+| Graph CSDL capability annotations | Partial — `Org.OData.Capabilities.V1.PermissionType` for some entities; many endpoints are missing or list only one of the two contexts | Sparse | Structured but cannot be trusted alone |
+| Microsoft Graph PowerShell SDK permission tables | Generated per cmdlet from the same docs source | Mirrors docs-contrib coverage | Easier to scrape (one row per cmdlet) but already derived |
+
+The consequence is that the operator cannot infer auth-context support purely from the CSDL/OpenAPI artefacts in §2.1. A **curated table**, seeded from the docs-contrib markdown and refreshed in CI, is the practical source of truth. The table maps `(method, path-template) → { application: yes|no, delegated: yes|no }` and ships alongside the operation profiles described in §11. This is the same shape as the curated-override mechanism already required by §11.5(2); §12 simply adds a second column to it.
+
+### 12.3 Representing auth-context capability in the operation profile
+
+Extend the operation profile from §11.2 with one new field per lifecycle slot:
+
+```yaml
+operationProfile:
+  # ... fields from §11.2 omitted for brevity ...
+  create:
+    method: POST
+    path: /me/messages
+    authContexts: [Delegated]              # NEW; default is [Application, Delegated]
+  observe:
+    method: GET
+    path: /me/messages/{id}
+    authContexts: [Delegated]
+  update:
+    method: PATCH
+    path: /me/messages/{id}
+    authContexts: [Delegated]
+  delete:
+    method: DELETE
+    path: /me/messages/{id}
+    authContexts: [Delegated]
+```
+
+`authContexts` is a set, not an enum, because many endpoints accept both. The default — applied when neither the CSDL nor the curated table says otherwise — is `[Application, Delegated]` (permissive). The curated table provides the override for endpoints known to be delegated-only. This keeps the §11 profile schema closed under extension: every quirk lands as a new field that defaults to the most permissive value, so unrecognised endpoints stay reachable.
+
+### 12.4 The credential context the operator advertises
+
+At startup, the operator classifies each configured credential and publishes the resulting set on a leader-elected `GraphOperatorStatus` CR and a Prometheus gauge:
+
+| Credential mode (per §5.3) | Context produced |
+|---|---|
+| Workload Identity (federated token, default in-cluster) | `Application` |
+| User-assigned managed identity | `Application` |
+| Client certificate / client secret | `Application` |
+| (none configured for delegated) | — |
+
+In the current design, the operator's context set is always `{Application}`. There is no in-cluster path that produces a `Delegated` context, by deliberate scope choice (see §12.8). Operators running with multiple credential profiles (per the three-level hierarchy in §5.3) take the union across all configured credentials.
+
+### 12.5 The hard-block check
+
+The check is a slot-level set intersection between the credential contexts the operator can supply and the contexts each slot requires.
+
+```
+for slot in effective_slots(spec.managementPolicies, profile.supports):
+    required = profile[slot].authContexts
+    if required ∩ operator.contexts == ∅:
+        reject(slot, required, operator.contexts)
+```
+
+This runs in two places:
+
+1. **Admission webhook (primary defence; extends §10.2).** Rejects the manifest before any cloud call. A representative rejection:
+
+   ```
+   Error: Group "platform-eng-mail" cannot be admitted.
+   The "/me/messages" endpoint requires a Delegated credential context for slot "Create".
+   This operator is running with credential contexts: [Application].
+   No application-permission path is available for /me/* endpoints.
+
+   Remediation:
+     - Use the Application-scoped equivalent: POST /users/{id}/messages (requires Mail.Send).
+     - Or restrict this resource to observation only: spec.managementPolicies: ["Observe"]
+       (this slot also requires Delegated and will be rejected).
+     - Brokering a delegated token from inside the cluster is not supported in this version.
+   ```
+
+2. **Reconciler-time defence-in-depth.** The same check runs immediately before the reconciler issues a transport call, mapped to a structured condition rather than a webhook rejection:
+
+   ```yaml
+   status:
+     conditions:
+     - type: Ready
+       status: "False"
+       reason: AuthContextUnavailable
+       message: >
+         Slot "Create" on /me/messages requires Delegated; operator contexts are [Application].
+         Manifest should not have reached the reconciler — admission webhook may be disabled.
+   ```
+
+   This catches three cases the webhook misses: webhook bypass via `--validate=false`, webhook unavailability at admission time, and post-admission changes to the operator's credential context (e.g. a Secret rotation that drops a credential).
+
+### 12.6 Surfacing the constraint before users write YAML
+
+Three additional touchpoints make the constraint visible without requiring a `kubectl apply` attempt:
+
+- **`kubectl graph explain <url>` (extends §10.5).** Prints the required auth contexts alongside the archetype, permissions, and example YAML. For `/me/messages` it prints `Required auth contexts: [Delegated]` and `Application-permission alternative: /users/{id}/messages`.
+- **Generated CRD documentation.** Typed CRDs that wrap a delegated-only profile (or any profile with at least one delegated-only slot) carry a banner in the generated reference docs and a `graph.example.com/auth-contexts: Delegated` label on the CRD object itself, so downstream tooling can filter on it.
+- **Operator startup log.** A single summary line aids capacity planning: `"operator running in Application-only mode; 137 of 1,021 shipped profiles have at least one slot that requires Delegated and will be unreachable"`. The same numbers populate a `graph_operator_unreachable_profiles` gauge for dashboard alerting.
+
+### 12.7 Mixed-context resources
+
+Many resources are only *partially* unreachable: `GET /users/{id}/messages` accepts Application (`Mail.Read`), `POST /users/{id}/sendMail` accepts Application (`Mail.Send`), but `POST /me/messages` does not. The profile expresses the constraint per slot, so partial manageability follows directly from the §11 effective-slot rule:
+
+```
+effective(slot) = (slot in profile.supports)
+                ∩ (slot in spec.managementPolicies)
+                ∩ (operator.contexts ∩ profile[slot].authContexts ≠ ∅)
+```
+
+A user who pins `spec.managementPolicies: ["Observe"]` on a resource whose `Observe` slot accepts `[Application, Delegated]` is admitted even if the `Create`/`Update`/`Delete` slots are delegated-only — those slots are inactive for this instance and are not checked. This preserves the §11.3 guarantee that the per-instance policy is the ultimate authority over what the controller is allowed to attempt.
+
+### 12.8 Explicitly out of scope (future work)
+
+The following are deliberately not part of this design and should be tracked as separate proposals if needed:
+
+| Out-of-scope item | Why deferred |
+|---|---|
+| **Delegated-token broker (OBO, refresh-token Secret, device-code).** Would let the operator drive delegated-only endpoints by exchanging a user token. | Each variant has a real cost: OBO requires a user-facing frontend to mint the initial token; long-lived refresh tokens have rotation, theft, and storage problems Kubernetes Secrets do not solve well; device-code is interactive and incompatible with controller loops. None can be added cleanly without changing the §5.3 auth model. Brokering is the obvious v2 follow-up but does not belong in the first cut. |
+| **Per-CR principal override.** Run a given reconcile under a different identity. | Already covered by the three-level credential hierarchy in §5.3. That mechanism changes *which* principal is used, not the *type* of credential; it cannot turn an Application-context operator into a Delegated-context one. |
+| **Conditional Access policy blocking application permissions.** A tenant CA rule can block app tokens for specific resources even when the permission grant is correct. | Produces the same 403 surface but with different remediation (admin must adjust CA, not switch credential type). Surfaced via the same `AuthContextUnavailable` condition but with a distinct reason code (`ConditionalAccessBlocked`); design of the CA-detection path is separate. |
+| **Tenant-side feature flags that gate application support.** Certain governance APIs accept Application only after a tenant admin enables a preview or grants an additional consent. | The profile cannot statically know this. Treated as a refinement of §12.9's curated-table-lag risk: the runtime fallback (403 → suggest override) handles it, but a structured representation is left for follow-up. |
+
+### 12.9 Risks and open questions
+
+| Risk | Discussion |
+|---|---|
+| **Curated table lags Graph changes.** New endpoints, beta-to-v1.0 promotions, and silent docs corrections can all flip an endpoint's auth-context support between operator releases. | Mitigation has two parts: (1) a weekly CI job that fetches `microsoftgraph/microsoft-graph-docs-contrib` and diffs the parsed permission tables against the shipped curated table, opening a PR with deltas; (2) a runtime fallback that maps `403 Authorization_RequestDenied` with the specific `/me` and known-delegated-only sub-strings into `reason: AuthContextLikelyDelegatedOnly` and recommends adding the endpoint to the override table. This converts a misclassification from a silent failure into an actionable PR. |
+| **Over-blocking.** Marking a slot delegated-only when it actually accepts application permissions in some tenants (because the tenant granted an additional preview permission, or uses a non-Commercial cloud where the surface differs) rejects legitimate usage. | Per-tenant override via the same admin-gated mechanism described in §11.5(3): the cluster admin can flip an entry from `[Delegated]` to `[Application, Delegated]` for a known good endpoint without rebuilding the operator. The override is logged and emits a metric so drift between operator and override set is observable. |
+| **Coverage of sovereign clouds.** §2.1 lists six sovereign CSDL variants; the docs-contrib markdown describes the commercial cloud only. Some sovereign tenants restrict endpoints differently. | Out of scope for the first cut; documented as a known gap. Tenant override is the escape hatch. |
+| **Webhook unavailability degrades the guarantee.** With the webhook down, manifests reach the reconciler and the user only sees `AuthContextUnavailable` after the fact. | Acceptable: the reconciler check guarantees no failed Graph call is issued, only that the failure is surfaced later than ideal. The webhook is a UX layer, not a security boundary. |
+| **The user-supplied profile escape hatch from §11.5(3) can be used to bypass `authContexts`.** A user with permission to inline a profile could write `authContexts: [Application]` against a delegated-only endpoint and still 403 at runtime. | Already mitigated by the admin gate on inline profile overrides; the runtime check in §12.5 will still produce `AuthContextLikelyDelegatedOnly` and surface the mistake. No additional control is warranted. |
 
 ---
