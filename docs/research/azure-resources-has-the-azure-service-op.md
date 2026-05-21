@@ -931,7 +931,7 @@ This keeps the RGD declarative and gives platform teams a knob that maps onto Cr
 |---|---|
 | **Where does the profile live at runtime?** Three plausible homes: (a) compiled into the operator binary at codegen time (fast, but every Graph schema bump requires an operator release); (b) shipped as a `ConfigMap` reloaded on startup (decoupled, but the operator and the data can drift in production); (c) a `GraphResourceType` CRD (a CRD-of-CRDs) reconciled like any other resource (most flexible, but adds a bootstrap dependency). Recommendation: ship (a) as the default and (b) as an override; reserve (c) until multi-tenant deployments demand it. |
 | **Drift between operator version and live Graph API.** The CSDL the generator consumed at build time can diverge from `https://graph.microsoft.com/v1.0/$metadata` at any point. A reconciler that hits a 4xx because the path moved or a capability flipped must surface a structured condition (`reason: ProfileDrift`) rather than retry blindly. A periodic CSDL-fetch sidecar can compare live metadata to the embedded profile set and emit metrics; this is cheaper than full re-derivation. |
-| **User-supplied profiles as a privilege-escalation vector.** A malicious or careless user with `create` permission on `GraphResource` could point `delete.path` at `/directoryRoles/{id}/members/$ref/{ownerId}` and use the operator's app permissions to remove themselves from oversight. Inline profile overrides MUST be off by default, gated by a cluster-scoped flag, and ideally additionally constrained by an admission policy that whitelists path prefixes. The curated-override table from §11.5(2) is the safer mechanism for legitimate one-off patches. |
+| **User-supplied profiles as a privilege-escalation vector.** A malicious or careless user with `create` permission on `GraphResource` could point `delete.path` at `/directoryRoles/{id}/members/$ref/{ownerId}` and use the operator's app permissions to remove themselves from oversight. Inline profile overrides MUST be off by default, gated by a cluster-scoped flag, and additionally constrained by an admission policy that enforces URL-prefix scoping (see §13). The curated-override table from §11.5(2) is the safer mechanism for legitimate one-off patches. The developer/user exposure split in §13.3 ensures operation policy details remain an RGD-authoring-layer concern and are never surfaced to end users. |
 | **Beta → v1.0 promotion.** When Graph promotes a resource from beta to v1.0, the path, body shape, and capability annotations may all change. The profile's `apiVersion` field pins the channel, but instances pinned to `beta` will keep using the old profile after promotion. A version-aliasing layer in the generator (`v1.0-or-beta-fallback`) handles the common case where the beta profile is forward-compatible; for the rest, an operator-emitted `Deprecated` condition with the promoted v1.0 path is the minimum acceptable migration aid. |
 | **Profile expressiveness ceiling.** The schema in §11.2 is deliberately small. Endpoints that need request signing, multi-step orchestration, or non-OData pagination will hit the ceiling. The escape hatch is the `actions[]` mechanism plus a sibling CR that drives the orchestration — not extending the profile vocabulary, because every new field becomes a new code path in every reconciler. |
 
@@ -1100,3 +1100,214 @@ The following are deliberately not part of this design and should be tracked as 
 | **The user-supplied profile escape hatch from §11.5(3) can be used to bypass `authContexts`.** A user with permission to inline a profile could write `authContexts: [Application]` against a delegated-only endpoint and still 403 at runtime. | Already mitigated by the admin gate on inline profile overrides; the runtime check in §12.5 will still produce `AuthContextLikelyDelegatedOnly` and surface the mistake. No additional control is warranted. |
 
 ---
+
+## 13. Privilege escalation prevention — URL-scope restriction and developer/user policy split
+
+This section operationalises the §11.8 risk by providing a concrete restriction model for inline operation profile overrides and a clear separation of what platform engineers can configure versus what end users of a ResourceBundle can see.
+
+### 13.1 The escalation surface, restated
+
+The risk from §11.8 is cross-resource path injection: a CR author with access to `GraphResource.spec.operationProfile` can write a `delete.path` (or any lifecycle-slot path) that targets a Graph endpoint unrelated to the declared `spec.url`. Because every lifecycle call is issued under the operator's service-principal credentials, a crafted `delete.path: /directoryRoles/{id}/members/$ref/{ownerId}` would use the operator's `RoleManagement.ReadWrite.Directory` grant to remove directory role members — regardless of what the CR's `spec.url` says.
+
+The fix has two independent layers:
+
+1. **URL-prefix scoping** — the admission webhook enforces that all paths in any inline profile override stay within the same resource root as `spec.url`.
+2. **Developer/user separation** — `spec.operationProfile` (inline override) is structurally invisible to end users; only RGD authors (platform engineers) have access to the policy fields that do reach them, and those fields are the safer named-preset and `managementPolicies` surfaces.
+
+### 13.2 URL-prefix scoping rule
+
+When `GraphOperatorConfig.allowInlineProfileOverrides: true` and a CR carries `spec.operationProfile`, the admission webhook runs the following check before any schema validation:
+
+**Step 1 — Derive the resource root from `spec.url`.**
+
+The resource root is the normalised collection-path prefix: the portion of `spec.url` up to and including the last static path segment that names a collection, before any `{id}` placeholder or bound-action name.
+
+| `spec.url` | Derived resource root |
+|---|---|
+| `/groups` | `/groups` |
+| `/groups/{id}` | `/groups` |
+| `/users/{id}/messages` | `/users/{id}/messages` |
+| `/policies/authenticationMethodsPolicy` | `/policies/authenticationMethodsPolicy` |
+| `/identityGovernance/privilegedAccess/group/assignmentScheduleRequests` | `/identityGovernance/privilegedAccess/group/assignmentScheduleRequests` |
+
+The derivation rule: strip only **trailing** `/{param}` segments (where a segment matches `{.*}`) from the right, stopping as soon as a static segment is reached. Pseudocode:
+
+```
+function resourceRoot(url):
+    segments = url.split("/")          // ["", "groups", "{id}"] for /groups/{id}
+    while segments is not empty and segments[-1] matches r"^\{.*\}$":
+        segments.pop()
+    return "/".join(segments)          // "/groups" for /groups/{id}
+                                       // "/users/{id}/messages" for /users/{id}/messages
+```
+
+For singleton paths with no template variables the full path is the root unchanged.
+
+**Step 2 — Check every path in the inline profile.**
+
+For every `path` field that appears in `spec.operationProfile` (across all lifecycle slots and `actions[]` entries), assert:
+
+```
+n_root     = normalize(resource_root)
+n_override = normalize(override_path)
+
+n_override == n_root  OR  n_override.startswith(n_root + "/")
+```
+
+where `normalize` lowercases the path, collapses duplicate slashes, and strips any trailing slash. Normalisation is applied to both sides to prevent case or encoding bypasses.
+
+**Step 3 — Reject on first violation.**
+
+```
+Error: GraphResource "platform-eng" cannot be admitted.
+spec.operationProfile.delete.path "/directoryRoles/{id}/members/$ref/{memberId}"
+is outside the resource root "/groups" derived from spec.url "/groups".
+
+Inline profile override paths must stay within the same resource scope.
+Legitimate sub-paths include: /groups/{id}/... (members, owners, appRoleAssignments, etc.)
+
+To modify directory role membership use a separate GraphResource scoped to /directoryRoles.
+```
+
+**What this prevents:**
+
+| Attack | Outcome |
+|---|---|
+| Redirect `delete.path` to `/directoryRoles/{id}/members/$ref/{ownerId}` | Rejected: `/directoryRoles` ≠ resource root `/groups` |
+| Redirect `create.path` to `/applications/{id}/addPassword` | Rejected: `/applications` ≠ resource root `/groups` |
+| Redirect `delete.path` to `/groups/{id}/owners/{ownerId}/$ref` | Allowed: within the `/groups` root, legitimate sub-path |
+| Redirect `create.path` to `/groups/{id}/members/$ref` | Allowed: within the `/groups` root |
+
+**What this does not prevent:**
+
+The prefix check is a blast-radius limiter, not a comprehensive correctness guarantee. Two residual risks are worth noting:
+
+- **Within-root escalation.** A path like `/groups/{id}/members/$ref` is within the `/groups` root and is allowed. If the operator holds `GroupMember.ReadWrite.All`, an attacker can still add or remove members of *any* group — including privileged groups — by controlling the `{id}` value. The prefix check reduces the cross-resource attack surface but does not prevent intra-resource privilege abuse. Additional controls (Kubernetes RBAC on which users can create `GraphResource`; OPA/Kyverno policies that restrict `spec.url` to an allowlist of group IDs; least-privilege permission scoping in the operator's app registration) are complementary defences.
+- **Admin-enabled inline overrides.** A user with operator-admin access who has legitimately enabled `allowInlineProfileOverrides` can still misconfigure paths within the resource root. The curated-override mechanism from §11.5(2) remains the preferred path for anything that requires non-trivial lifecycle shaping.
+
+### 13.3 Developer / user exposure model
+
+There are three principals in the layered model, with strictly decreasing access to operation policy fields:
+
+| Capability | Operator admin | RGD author (ResourceBundle developer) | End user (ResourceInstance) |
+|---|---|---|---|
+| Enable `allowInlineProfileOverrides` cluster-wide | ✅ `GraphOperatorConfig` | ❌ | ❌ |
+| Author a named curated-override entry | ✅ (version-controlled table, operator release) | ❌ | ❌ |
+| Write `spec.operationProfile` (inline override) on a CR | ✅ (only with admin flag + prefix check from §13.2) | ❌ (blocked by webhook) | ❌ |
+| Set `spec.profileRef` (named preset reference) | ✅ | ✅ (as a literal or CEL expression in the RGD template) | ❌ (resolved by RGD synthesis) |
+| Set `spec.managementPolicies` | ✅ | ✅ (can template from RGD schema field) | ✅ (only if RGD schema explicitly exposes it) |
+| Set `spec.body` (domain fields) | ✅ | ✅ | ✅ (primary authoring surface) |
+
+**How RGD authors use `profileRef`:**
+
+An RGD author selects from the set of named operation profiles the operator ships (auto-derived from CSDL, or curated). They cannot author a new raw profile; they select from a closed set. The selection is fixed in the RGD template — end users of the ResourceInstance never see it:
+
+```yaml
+resources:
+  - id: group
+    template:
+      apiVersion: graph.example.com/v1
+      kind: Group
+      spec:
+        profileRef: "crud"          # hardcoded by RGD author; end user never sees this
+        managementPolicies: ${
+          instance.spec.mode == "readonly" ? ["Observe"] : ["Observe","Create","Update","Delete"]
+        }
+        body:
+          displayName: ${instance.spec.displayName}
+          securityEnabled: true
+          mailEnabled: false
+```
+
+**How `managementPolicies` is optionally surfaced to end users:**
+
+If the RGD schema exposes a `mode` or `managementPolicies` field, end users set that field on the ResourceInstance. The RGD template translates it before it reaches the underlying GraphResource. The translation is always authored by the platform engineer in CEL. A platform engineer who wants to give end users direct `managementPolicies` control can expose it literally; one who wants to hide the operator idiom behind a friendlier abstraction uses a CEL map expression (as shown in §11.7).
+
+**Webhook enforcement of the developer/user boundary:**
+
+The admission webhook enforces the split statically:
+
+- Any `spec.operationProfile` field present on an incoming `GraphResource` (or related CRD) triggers the admin-flag check first, and then the §13.2 prefix check.
+- There is no runtime mechanism that allows an end user creating a ResourceInstance to reach `spec.operationProfile` on the synthesised child CR — kro synthesises child CRs from the RGD template, not from the ResourceInstance spec directly; the synthesised CR either carries a `profileRef` (set by the template) or no profile field at all.
+
+This creates a hard separation: the only path to inline profile configuration passes through a cluster-admin opt-in gate that no RGD template can reach.
+
+### 13.4 Worked example: tight RGD with both restrictions active
+
+Scenario: a platform team ships a `ManagedGroup` ResourceBundle that exposes only `displayName` and `mode` to developers. Under the hood it uses the `crud` preset. The cluster admin has NOT enabled `allowInlineProfileOverrides`.
+
+```yaml
+# Authored once by the platform team (RGD author)
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata: { name: managed-group }
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ManagedGroup
+    spec:
+      displayName: string
+      mode: string | enum=["readonly","managed"] | default="managed"
+  resources:
+    - id: group
+      template:
+        apiVersion: graph.example.com/v1
+        kind: Group
+        spec:
+          profileRef: "crud"
+          managementPolicies: ${
+            instance.spec.mode == "readonly" ? ["Observe"] : ["Observe","Create","Update","Delete","LateInitialize"]
+          }
+          body:
+            displayName: ${instance.spec.displayName}
+            mailEnabled: false
+            mailNickname: ${toLower(instance.spec.displayName)}
+            securityEnabled: true
+```
+
+```yaml
+# Created by an application developer (end user)
+apiVersion: v1alpha1
+kind: ManagedGroup
+metadata: { name: my-team }
+spec:
+  displayName: My Team
+  mode: managed
+# The end user sees only displayName and mode.
+# profileRef, managementPolicies, and operationProfile are never in their schema.
+```
+
+The kro controller synthesises a `Group` CR:
+
+```yaml
+# Synthesised by kro (never written directly by the end user)
+apiVersion: graph.example.com/v1
+kind: Group
+metadata:
+  name: my-team
+  ownerReferences:
+    - apiVersion: v1alpha1
+      kind: ManagedGroup
+      name: my-team
+spec:
+  profileRef: "crud"
+  managementPolicies: ["Observe","Create","Update","Delete","LateInitialize"]
+  body:
+    displayName: My Team
+    mailEnabled: false
+    mailNickname: my-team
+    securityEnabled: true
+  # spec.operationProfile is absent; no inline override; prefix check not triggered
+```
+
+If an attacker crafts a `Group` CR with `spec.operationProfile.delete.path: /directoryRoles/{id}/members/$ref/{ownerId}` and submits it directly (bypassing kro), the admission webhook rejects it on two independent grounds: (1) `allowInlineProfileOverrides` is false; (2) even if it were true, `/directoryRoles` does not start with the resource root `/groups`.
+
+### 13.5 Invariant alignment
+
+| Invariant | Alignment |
+|---|---|
+| **Reconciliation-first** | URL-prefix scoping does not affect the reconcile loop; it prevents bad CRs from being admitted, so the loop only ever sees well-formed resources. |
+| **DAG-preserving** | Restricting override paths has no effect on dependency ordering; DAG edges come from `spec` references, not from lifecycle paths. |
+| **Explicit operation contracts** | The prefix check makes the contract stricter, not looser — lifecycle paths must be declared and must stay within scope. Nothing is inferred from transport verbs. |
+| **Declarative-first authoring** | Both restrictions apply at admission time against a declarative manifest, not during execution. The end-user surface remains declarative and free of transport details. |
+| **Cloud-agnostic core** | The prefix-scoping rule is a structural check on URL segments; it is not Graph-specific and will apply equally to any API-native resource managed by the operator. |
