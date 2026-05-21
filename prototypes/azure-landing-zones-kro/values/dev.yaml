@@ -1,0 +1,17 @@
+# Example instance of the AzureLandingZone API exposed by ../resourcegraph.yaml.
+# Apply after the ResourceGraphDefinition has been installed.
+apiVersion: iac.experiment/v1alpha1
+kind: AzureLandingZone
+metadata:
+  name: alz-dev
+spec:
+  # Tenant root MG id (typically the tenant id, e.g. 00000000-0000-0000-0000-000000000000).
+  rootParentId: "00000000-0000-0000-0000-000000000000"
+  # Every MG name in the hierarchy is prefixed with this; lets you stand up
+  # multiple ALZ instances in the same tenant for testing.
+  prefix: alz-dev
+  # Default Azure region used by assignments that require a location.
+  location: westeurope
+  # Per-archetype overrides surfaced as inputs on the AzureLandingZone schema.
+  ddosPlanId: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-connectivity/providers/Microsoft.Network/ddosProtectionPlans/alz-ddos"
+  logAnalyticsWorkspaceId: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-management/providers/Microsoft.OperationalInsights/workspaces/alz-law"

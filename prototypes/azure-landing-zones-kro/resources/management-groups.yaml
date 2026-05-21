@@ -1,0 +1,127 @@
+# Management group resource templates (reference / standalone)
+#
+# These manifests show the exact CRD bodies that the kro graph in
+# ../resourcegraph.yaml renders. They are kept as standalone YAML for
+# review and as a focused "what does one leaf actually look like" reference.
+# Applying ../resourcegraph.yaml is sufficient — you do not need to apply
+# these directly.
+#
+# Source mapping:
+#   ../../docs/research/azure-landing-zones-kro-prototype.md
+#   Azure-Landing-Zones-Library/platform/alz/architecture_definitions/alz.alz_architecture_definition.json
+#
+# Provider: Upbound provider-azure-management
+# CRD:      management.azure.upbound.io/v1beta1/ManagementGroup
+#
+# kro derives the parent → child ordering from the CEL ref
+#   parentManagementGroupId: ${mgIntermediateRoot.status.atProvider.id}
+# in the graph; explicit dependsOn is not used.
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-alz
+spec:
+  forProvider:
+    displayName: Azure Landing Zones
+    # tenant root id (or another MG id) supplied by the AzureLandingZone instance
+    parentManagementGroupId: <tenant-or-root-mg-id>
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-platform
+spec:
+  forProvider:
+    displayName: Platform
+    parentManagementGroupId: alz-alz
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-connectivity
+spec:
+  forProvider:
+    displayName: Connectivity
+    parentManagementGroupId: alz-platform
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-identity
+spec:
+  forProvider:
+    displayName: Identity
+    parentManagementGroupId: alz-platform
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-management
+spec:
+  forProvider:
+    displayName: Management
+    parentManagementGroupId: alz-platform
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-security
+spec:
+  forProvider:
+    displayName: Security
+    parentManagementGroupId: alz-platform
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-landingzones
+spec:
+  forProvider:
+    displayName: Landing zones
+    parentManagementGroupId: alz-alz
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-corp
+spec:
+  forProvider:
+    displayName: Corp
+    parentManagementGroupId: alz-landingzones
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-online
+spec:
+  forProvider:
+    displayName: Online
+    parentManagementGroupId: alz-landingzones
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-local
+spec:
+  forProvider:
+    displayName: Local
+    parentManagementGroupId: alz-landingzones
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-sandbox
+spec:
+  forProvider:
+    displayName: Sandbox
+    parentManagementGroupId: alz-alz
+---
+apiVersion: management.azure.upbound.io/v1beta1
+kind: ManagementGroup
+metadata:
+  name: alz-decommissioned
+spec:
+  forProvider:
+    displayName: Decommissioned
+    parentManagementGroupId: alz-alz
