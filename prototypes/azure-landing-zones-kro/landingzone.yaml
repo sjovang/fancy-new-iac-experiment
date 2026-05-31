@@ -1,0 +1,90 @@
+# Authoring file for the Azure Landing Zone kro prototype.
+#
+# This file is the only thing a human edits. `tools/render` reads it, fetches
+# the configured libraries from GitHub, merges them (later libraries override
+# earlier ones on the same filename), applies the overlays declared here, and
+# emits `generated/resourcegraph.yaml`.
+#
+# Updating from upstream  = bump a `ref` in `libraries`.
+# Adding org guardrails  = add a second `libraries` entry pointing at your repo.
+# Adding a custom archetype/MG/override = edit this file, re-render.
+#
+# Required keys: parentResourceId, prefix, location, libraries.
+# Everything else is an optional overlay.
+
+parentResourceId: "00000000-0000-0000-0000-000000000000"
+prefix: alz
+location: westeurope
+
+# Ordered list of libraries. Each entry is a GitHub repo + ref + path inside
+# the repo that follows the standard ALZ library layout
+# (architecture_definitions/, archetype_definitions/, policy_assignments/,
+# policy_definitions/, alz_policy_default_values.json).
+#
+# Later entries override earlier ones on the same file basename. This is the
+# inheritance mechanism: keep azure/azure-landing-zones-library as the base
+# and add a second entry pointing at your own repo to extend or override it
+# without forking.
+libraries:
+  - repo: Azure/Azure-Landing-Zones-Library
+    ref: 503487fe693e93c3d21ec052161d5f7e9e621f3d
+    path: platform/alz
+  # Example: layer an org-specific library on top.
+  # - repo: my-org/my-alz-library
+  #   ref: v1.2.0
+  #   path: alz
+
+# Pick a base architecture (a file in `architecture_definitions/`). Omit to
+# start from scratch and declare every MG inline below.
+baseArchitecture: alz
+
+# Customise the MG hierarchy on top of the base architecture:
+#   - new name      => append a new MG (parent is required)
+#   - existing name => override fields (parent, displayName, archetypes)
+#   - disabled:true => remove the MG from the base architecture
+managementGroups: []
+  # Example overrides:
+  # - name: corp
+  #   archetypes: [corp, my-extra-archetype]
+  # - name: mybiz
+  #   parent: landingzones
+  #   displayName: My Business
+  #   archetypes: [my-biz-archetype]
+  # - name: online
+  #   disabled: true
+
+# Define brand-new archetypes by composing assignment names from the merged
+# library set. A name that matches a library archetype replaces it.
+archetypes: {}
+  # Example:
+  # my-biz-archetype:
+  #   policyAssignments: [Deny-Public-IP, Audit-PeDnsZones]
+
+# Add/remove assignments on a library archetype without redefining it.
+archetypeOverrides: {}
+  # Example:
+  # corp:
+  #   add: [Deny-Storage-http]
+  #   remove: [Deny-HybridNetworking]
+
+# Shared values consumed via alz_policy_default_values.json (resolved from the
+# merged library set). One value here can flow into many assignment parameters.
+policyDefaultValues:
+  ddos_protection_plan_id: ""
+  log_analytics_workspace_id: ""
+
+# Per-(MG → assignment) tweaks. Anything not listed uses library defaults
+# (with policyDefaultValues already applied).
+policyAssignmentsToModify: {}
+  # Example:
+  # connectivity:
+  #   Enable-DDoS-VNET:
+  #     enforcementMode: Default
+  #     parameters:
+  #       effect: Modify
+
+# Escape hatch: skip a specific assignment for a specific MG without changing
+# the archetype.
+policyAssignmentsToDisable: {}
+  # Example:
+  # identity: [Deny-Public-IP]
