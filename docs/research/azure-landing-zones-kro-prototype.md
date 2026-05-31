@@ -109,6 +109,28 @@ This intentionally diverges from the prior research note (`can-kro-https-azure-g
 | **4. Declarative-first authoring (loops/conditionals allowed)** | The graph uses kro’s declarative composition; per-archetype variation is expressed as separate template entries rather than imperative steps. Per-environment differences ride on the `AzureLandingZone` schema, not procedural overrides. |
 | **5. Cloud-agnostic core**                                      | kro itself is cloud-neutral. Azure specificity is confined to the CRD types referenced in resource templates. The graph schema (`AzureLandingZone`) is a vendor-neutral surface that could be retargeted to another provider by substituting resource templates. |
 
+## Renderer-driven authoring (post-initial-prototype refinement)
+
+The first iteration of the prototype hand-wrote each `ManagementGroup`, `PolicyDefinition`, and `ManagementGroupPolicyAssignment` resource entry in the `ResourceGraphDefinition`. That made upstream-library updates manual and per-policy code unavoidable.
+
+The current design replaces the hand-coded graph with two artifacts:
+
+1. **`landingzone.yaml`** — a small declarative authoring file listing MGs and, per MG, a `policyAssignments:` list of `{name, parameters?}` pairs. Assignment names match upstream library files.
+2. **`tools/render` (Go)** — a renderer that fetches `Azure/Azure-Landing-Zones-Library` at a pinned commit SHA (`libraryRef` in the input), enumerates every `policy_definitions/*.json` and `policy_assignments/*.json`, and emits `generated/resourcegraph.yaml`.
+
+Key properties:
+
+- **No per-policy code.** Every custom `PolicyDefinition` the library ships is emitted generically by mapping ARM-JSON `properties` to the Crossplane CRD shape (policy rule and parameters serialised as JSON blocks). Built-in definitions stay as ARM ID strings on assignments.
+- **Chaining via CEL refs (the user's "chain resources" requirement).** The renderer emits every dependency edge as a CEL ref the kro DAG-builder consumes:
+  - child MG `parentManagementGroupId` → parent MG `${...status.atProvider.id}`
+  - assignment `managementGroupId` → its MG `${...status.atProvider.id}`
+  - assignment `policyDefinitionId` → custom `PolicyDefinition` CR `${pd<Name>.status.atProvider.id}` when the upstream `policyDefinitionId` references a vendored custom definition; otherwise the built-in ARM ID is passed through verbatim
+  - custom `PolicyDefinition` `managementGroupId` → intermediate-root MG `${mg<Root>.status.atProvider.id}`
+- **Updating from upstream** = bump `libraryRef`, re-render, review the diff. No code changes per upstream bump.
+- **Why a build-time renderer rather than runtime iteration in kro.** kro's `ResourceGraphDefinition` is a static set of resource templates with CEL refs; it cannot iterate at reconcile time over a user-supplied list to materialise N resources, nor can it read external library JSON. The renderer is therefore the smallest place to put the abstraction. The runtime stays kro + Crossplane with reconciliation-first semantics — only the authoring surface changes.
+
+This change does not alter the trait-spec alignment table above. It strengthens trait 2 (every chain edge is now an explicit CEL ref) and trait 4 (authoring becomes a single declarative list, not many hand-rolled templates).
+
 ## Out-of-scope (deliberate)
 
 - **Policy set definitions (initiatives)** — same shape as policy definitions; trivial to add later but adds noise.

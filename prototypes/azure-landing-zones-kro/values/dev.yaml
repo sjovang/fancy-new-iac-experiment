@@ -1,4 +1,4 @@
-# Example instance of the AzureLandingZone API exposed by ../resourcegraph.yaml.
+# Example instance of the AzureLandingZone API exposed by ../generated/resourcegraph.yaml.
 # Apply after the ResourceGraphDefinition has been installed.
 apiVersion: iac.experiment/v1alpha1
 kind: AzureLandingZone
@@ -12,6 +12,8 @@ spec:
   prefix: alz-dev
   # Default Azure region used by assignments that require a location.
   location: westeurope
-  # Per-archetype overrides surfaced as inputs on the AzureLandingZone schema.
-  ddosPlanId: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-connectivity/providers/Microsoft.Network/ddosProtectionPlans/alz-ddos"
-  logAnalyticsWorkspaceId: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-management/providers/Microsoft.OperationalInsights/workspaces/alz-law"
+  # Per-environment values referenced from landingzone.yaml as ${inputs.<key>}.
+  # The renderer rewrites those to ${schema.spec.inputs.<key>} in the graph.
+  inputs:
+    ddosPlanId: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-connectivity/providers/Microsoft.Network/ddosProtectionPlans/alz-ddos"
+    logAnalyticsWorkspaceId: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-management/providers/Microsoft.OperationalInsights/workspaces/alz-law"

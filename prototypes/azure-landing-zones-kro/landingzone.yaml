@@ -1,0 +1,101 @@
+# Authoring file for the Azure Landing Zone kro prototype.
+#
+# This file is the only thing a human edits. `tools/render` reads it, fetches
+# the upstream Azure-Landing-Zones-Library at `libraryRef`, and emits
+# `generated/resourcegraph.yaml` — a complete kro ResourceGraphDefinition that
+# chains its DAG through CEL refs.
+#
+# Adding a new policy assignment = add one entry to a managementGroup's
+# `policyAssignments` list. No new code, no new resource templates.
+# Adding more management groups = add an entry under `managementGroups`.
+# Updating from upstream = bump `libraryRef` and re-render.
+
+prefix: alz
+rootParentId: "00000000-0000-0000-0000-000000000000"
+location: westeurope
+
+# Pinned commit SHA of Azure/Azure-Landing-Zones-Library. Bump and re-run
+# `go run ./tools/render -in <this file> -out generated/resourcegraph.yaml`
+# to pick up upstream changes.
+libraryRef: 503487fe693e93c3d21ec052161d5f7e9e621f3d
+
+# Per-environment values surfaced on the AzureLandingZone CRD as
+# spec.inputs.<key>. Reference them from policyAssignments parameters as
+# `${inputs.<key>}` — the renderer rewrites those to `${schema.spec.inputs.<key>}`.
+inputs:
+  ddosPlanId: ""
+  logAnalyticsWorkspaceId: ""
+
+# Management group hierarchy.
+# `parent: root` marks the intermediate root (child of the tenant root MG, set
+# by spec.rootParentId at apply time). The intermediate root is also the scope
+# where every custom PolicyDefinition CR is created.
+# Each child MG references its parent by name; the renderer turns that into a
+# CEL ref so kro reconciles parents before children.
+managementGroups:
+  - name: alz
+    displayName: Azure Landing Zones
+    parent: root
+
+  - name: platform
+    parent: alz
+
+  - name: connectivity
+    parent: platform
+    policyAssignments:
+      - name: Enable-DDoS-VNET
+        parameters:
+          ddosPlan: ${inputs.ddosPlanId}
+          effect: Modify
+
+  - name: identity
+    parent: platform
+    policyAssignments:
+      - name: Deny-MgmtPorts-Internet
+        parameters: { effect: Deny }
+      - name: Deny-Public-IP
+        parameters: { effect: Deny }
+
+  - name: management
+    parent: platform
+
+  - name: security
+    parent: platform
+
+  - name: landingzones
+    displayName: Landing zones
+    parent: alz
+    policyAssignments:
+      - name: Deny-IP-forwarding
+        parameters: { effect: Deny }
+      - name: Deny-Storage-http
+        parameters: { effect: Deny }
+
+  - name: corp
+    parent: landingzones
+    policyAssignments:
+      - name: Audit-PeDnsZones
+        parameters: { effect: Audit }
+      # The library ships this as a custom PolicyDefinition; the renderer
+      # automatically turns the assignment's policyDefinitionId into a CEL
+      # ref to that PolicyDefinition CR, so kro reconciles the def first.
+      - name: Deny-Public-IP-On-NIC
+
+  - name: online
+    parent: landingzones
+
+  - name: local
+    parent: landingzones
+    policyAssignments:
+      - name: Enforce-ALDO-Services
+
+  - name: sandbox
+    parent: alz
+
+  - name: decommissioned
+    parent: alz
+    # Note: the upstream Enforce-ALZ-Decomm assignment targets a *policy set
+    # definition* (initiative), which this prototype keeps out of scope. Add
+    # `Enforce-ALZ-Decomm` here once `policy_set_definitions/*.json` are
+    # vendored as `PolicySetDefinition` CRs in the renderer.
+    policyAssignments: []
