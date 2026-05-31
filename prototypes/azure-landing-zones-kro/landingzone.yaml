@@ -1,101 +1,90 @@
 # Authoring file for the Azure Landing Zone kro prototype.
 #
 # This file is the only thing a human edits. `tools/render` reads it, fetches
-# the upstream Azure-Landing-Zones-Library at `libraryRef`, and emits
-# `generated/resourcegraph.yaml` — a complete kro ResourceGraphDefinition that
-# chains its DAG through CEL refs.
+# the configured libraries from GitHub, merges them (later libraries override
+# earlier ones on the same filename), applies the overlays declared here, and
+# emits `generated/resourcegraph.yaml`.
 #
-# Adding a new policy assignment = add one entry to a managementGroup's
-# `policyAssignments` list. No new code, no new resource templates.
-# Adding more management groups = add an entry under `managementGroups`.
-# Updating from upstream = bump `libraryRef` and re-render.
+# Updating from upstream  = bump a `ref` in `libraries`.
+# Adding org guardrails  = add a second `libraries` entry pointing at your repo.
+# Adding a custom archetype/MG/override = edit this file, re-render.
+#
+# Required keys: parentResourceId, prefix, location, libraries.
+# Everything else is an optional overlay.
 
+parentResourceId: "00000000-0000-0000-0000-000000000000"
 prefix: alz
-rootParentId: "00000000-0000-0000-0000-000000000000"
 location: westeurope
 
-# Pinned commit SHA of Azure/Azure-Landing-Zones-Library. Bump and re-run
-# `go run ./tools/render -in <this file> -out generated/resourcegraph.yaml`
-# to pick up upstream changes.
-libraryRef: 503487fe693e93c3d21ec052161d5f7e9e621f3d
+# Ordered list of libraries. Each entry is a GitHub repo + ref + path inside
+# the repo that follows the standard ALZ library layout
+# (architecture_definitions/, archetype_definitions/, policy_assignments/,
+# policy_definitions/, alz_policy_default_values.json).
+#
+# Later entries override earlier ones on the same file basename. This is the
+# inheritance mechanism: keep azure/azure-landing-zones-library as the base
+# and add a second entry pointing at your own repo to extend or override it
+# without forking.
+libraries:
+  - repo: Azure/Azure-Landing-Zones-Library
+    ref: 503487fe693e93c3d21ec052161d5f7e9e621f3d
+    path: platform/alz
+  # Example: layer an org-specific library on top.
+  # - repo: my-org/my-alz-library
+  #   ref: v1.2.0
+  #   path: alz
 
-# Per-environment values surfaced on the AzureLandingZone CRD as
-# spec.inputs.<key>. Reference them from policyAssignments parameters as
-# `${inputs.<key>}` — the renderer rewrites those to `${schema.spec.inputs.<key>}`.
-inputs:
-  ddosPlanId: ""
-  logAnalyticsWorkspaceId: ""
+# Pick a base architecture (a file in `architecture_definitions/`). Omit to
+# start from scratch and declare every MG inline below.
+baseArchitecture: alz
 
-# Management group hierarchy.
-# `parent: root` marks the intermediate root (child of the tenant root MG, set
-# by spec.rootParentId at apply time). The intermediate root is also the scope
-# where every custom PolicyDefinition CR is created.
-# Each child MG references its parent by name; the renderer turns that into a
-# CEL ref so kro reconciles parents before children.
-managementGroups:
-  - name: alz
-    displayName: Azure Landing Zones
-    parent: root
+# Customise the MG hierarchy on top of the base architecture:
+#   - new name      => append a new MG (parent is required)
+#   - existing name => override fields (parent, displayName, archetypes)
+#   - disabled:true => remove the MG from the base architecture
+managementGroups: []
+  # Example overrides:
+  # - name: corp
+  #   archetypes: [corp, my-extra-archetype]
+  # - name: mybiz
+  #   parent: landingzones
+  #   displayName: My Business
+  #   archetypes: [my-biz-archetype]
+  # - name: online
+  #   disabled: true
 
-  - name: platform
-    parent: alz
+# Define brand-new archetypes by composing assignment names from the merged
+# library set. A name that matches a library archetype replaces it.
+archetypes: {}
+  # Example:
+  # my-biz-archetype:
+  #   policyAssignments: [Deny-Public-IP, Audit-PeDnsZones]
 
-  - name: connectivity
-    parent: platform
-    policyAssignments:
-      - name: Enable-DDoS-VNET
-        parameters:
-          ddosPlan: ${inputs.ddosPlanId}
-          effect: Modify
+# Add/remove assignments on a library archetype without redefining it.
+archetypeOverrides: {}
+  # Example:
+  # corp:
+  #   add: [Deny-Storage-http]
+  #   remove: [Deny-HybridNetworking]
 
-  - name: identity
-    parent: platform
-    policyAssignments:
-      - name: Deny-MgmtPorts-Internet
-        parameters: { effect: Deny }
-      - name: Deny-Public-IP
-        parameters: { effect: Deny }
+# Shared values consumed via alz_policy_default_values.json (resolved from the
+# merged library set). One value here can flow into many assignment parameters.
+policyDefaultValues:
+  ddos_protection_plan_id: ""
+  log_analytics_workspace_id: ""
 
-  - name: management
-    parent: platform
+# Per-(MG → assignment) tweaks. Anything not listed uses library defaults
+# (with policyDefaultValues already applied).
+policyAssignmentsToModify: {}
+  # Example:
+  # connectivity:
+  #   Enable-DDoS-VNET:
+  #     enforcementMode: Default
+  #     parameters:
+  #       effect: Modify
 
-  - name: security
-    parent: platform
-
-  - name: landingzones
-    displayName: Landing zones
-    parent: alz
-    policyAssignments:
-      - name: Deny-IP-forwarding
-        parameters: { effect: Deny }
-      - name: Deny-Storage-http
-        parameters: { effect: Deny }
-
-  - name: corp
-    parent: landingzones
-    policyAssignments:
-      - name: Audit-PeDnsZones
-        parameters: { effect: Audit }
-      # The library ships this as a custom PolicyDefinition; the renderer
-      # automatically turns the assignment's policyDefinitionId into a CEL
-      # ref to that PolicyDefinition CR, so kro reconciles the def first.
-      - name: Deny-Public-IP-On-NIC
-
-  - name: online
-    parent: landingzones
-
-  - name: local
-    parent: landingzones
-    policyAssignments:
-      - name: Enforce-ALDO-Services
-
-  - name: sandbox
-    parent: alz
-
-  - name: decommissioned
-    parent: alz
-    # Note: the upstream Enforce-ALZ-Decomm assignment targets a *policy set
-    # definition* (initiative), which this prototype keeps out of scope. Add
-    # `Enforce-ALZ-Decomm` here once `policy_set_definitions/*.json` are
-    # vendored as `PolicySetDefinition` CRs in the renderer.
-    policyAssignments: []
+# Escape hatch: skip a specific assignment for a specific MG without changing
+# the archetype.
+policyAssignmentsToDisable: {}
+  # Example:
+  # identity: [Deny-Public-IP]

@@ -109,27 +109,67 @@ This intentionally diverges from the prior research note (`can-kro-https-azure-g
 | **4. Declarative-first authoring (loops/conditionals allowed)** | The graph uses kro’s declarative composition; per-archetype variation is expressed as separate template entries rather than imperative steps. Per-environment differences ride on the `AzureLandingZone` schema, not procedural overrides. |
 | **5. Cloud-agnostic core**                                      | kro itself is cloud-neutral. Azure specificity is confined to the CRD types referenced in resource templates. The graph schema (`AzureLandingZone`) is a vendor-neutral surface that could be retargeted to another provider by substituting resource templates. |
 
-## Renderer-driven authoring (post-initial-prototype refinement)
+## Architecture-driven authoring (Terraform parity)
 
-The first iteration of the prototype hand-wrote each `ManagementGroup`, `PolicyDefinition`, and `ManagementGroupPolicyAssignment` resource entry in the `ResourceGraphDefinition`. That made upstream-library updates manual and per-policy code unavoidable.
+The first iteration of the prototype hand-wrote every `ManagementGroup`, `PolicyDefinition`, and `ManagementGroupPolicyAssignment` resource in the `ResourceGraphDefinition`. A second iteration moved the per-policy code into a renderer that consumed a single library at a pinned ref but still required the user to enumerate MGs and assignments by name. The current iteration mirrors the authoring model of the Terraform [`avm-ptn-alz`](https://github.com/Azure/terraform-azurerm-avm-ptn-alz) module.
 
-The current design replaces the hand-coded graph with two artifacts:
+### Authoring surface
 
-1. **`landingzone.yaml`** — a small declarative authoring file listing MGs and, per MG, a `policyAssignments:` list of `{name, parameters?}` pairs. Assignment names match upstream library files.
-2. **`tools/render` (Go)** — a renderer that fetches `Azure/Azure-Landing-Zones-Library` at a pinned commit SHA (`libraryRef` in the input), enumerates every `policy_definitions/*.json` and `policy_assignments/*.json`, and emits `generated/resourcegraph.yaml`.
+`prototypes/azure-landing-zones-kro/landingzone.yaml`:
 
-Key properties:
+- **Required**: `parentResourceId`, `prefix`, `location`, `libraries[]`.
+- **Optional overlays**: `baseArchitecture`, `managementGroups` (add/override/remove), `archetypes` (define new), `archetypeOverrides` (`add`/`remove` on a library archetype), `policyAssignmentsToModify` (per-(MG → assignment) parameter and `enforcementMode` tweaks), `policyAssignmentsToDisable`, `policyDefaultValues`.
 
-- **No per-policy code.** Every custom `PolicyDefinition` the library ships is emitted generically by mapping ARM-JSON `properties` to the Crossplane CRD shape (policy rule and parameters serialised as JSON blocks). Built-in definitions stay as ARM ID strings on assignments.
-- **Chaining via CEL refs (the user's "chain resources" requirement).** The renderer emits every dependency edge as a CEL ref the kro DAG-builder consumes:
-  - child MG `parentManagementGroupId` → parent MG `${...status.atProvider.id}`
-  - assignment `managementGroupId` → its MG `${...status.atProvider.id}`
-  - assignment `policyDefinitionId` → custom `PolicyDefinition` CR `${pd<Name>.status.atProvider.id}` when the upstream `policyDefinitionId` references a vendored custom definition; otherwise the built-in ARM ID is passed through verbatim
-  - custom `PolicyDefinition` `managementGroupId` → intermediate-root MG `${mg<Root>.status.atProvider.id}`
-- **Updating from upstream** = bump `libraryRef`, re-render, review the diff. No code changes per upstream bump.
-- **Why a build-time renderer rather than runtime iteration in kro.** kro's `ResourceGraphDefinition` is a static set of resource templates with CEL refs; it cannot iterate at reconcile time over a user-supplied list to materialise N resources, nor can it read external library JSON. The renderer is therefore the smallest place to put the abstraction. The runtime stays kro + Crossplane with reconciliation-first semantics — only the authoring surface changes.
+The minimal valid input is the four required keys plus `baseArchitecture: alz` — equivalent to Terraform's smallest avm-ptn-alz example.
 
-This change does not alter the trait-spec alignment table above. It strengthens trait 2 (every chain edge is now an explicit CEL ref) and trait 4 (authoring becomes a single declarative list, not many hand-rolled templates).
+### Layered libraries (inheritance)
+
+`libraries` is an ordered list of `{repo, ref, path}` entries. Each entry must follow the standard ALZ library layout (`architecture_definitions/`, `archetype_definitions/`, `policy_assignments/`, `policy_definitions/`, `alz_policy_default_values.json`). The renderer fetches each library's tree from GitHub, builds per-library catalogues, and **merges them file-name-wise — later entries override earlier ones**. `alz_policy_default_values.json` is merged at the `default_name` level so an org library can replace individual defaults without redefining the whole document.
+
+This is the same mental model as the Terraform module's `lib_urls` input: keep `Azure/Azure-Landing-Zones-Library` as the base entry, layer your own repo on top to override the `alz` architecture, add archetypes, change assignment defaults, etc. without forking upstream.
+
+### Renderer pipeline
+
+1. Fetch each library's tree and listings (one `git/trees` call per library).
+2. Merge listings file-name-wise; merge `alz_policy_default_values.json` at the default-name level.
+3. Resolve `baseArchitecture` (if set) → seed MG hierarchy.
+4. Apply `managementGroups` overlays (add / override fields / drop via `disabled: true`).
+5. Compose each archetype's effective assignment list (library entries overlaid with `archetypes` and `archetypeOverrides`).
+6. For each MG, union assignments across its archetypes; subtract `policyAssignmentsToDisable`.
+7. For each (mg, assignment) pair: deep-copy the merged library assignment JSON, substitute `policyDefaultValues` into named parameters via `alz_policy_default_values.json`, apply `policyAssignmentsToModify[mg][assignment]` overrides (parameter values merge; top-level fields replace).
+8. Emit one `ManagementGroup` CR per MG, one `ManagementGroupPolicyAssignment` CR per emitted pair, and **only the custom `PolicyDefinition` CRs actually referenced** by an emitted assignment. With the default `alz` architecture this drops from 149 to 4 emitted definitions.
+9. Validate every name reference (assignments referenced by archetypes, archetypes referenced by MGs, MG parents) and fail fast on typos.
+
+### Output size
+
+The first renderer iteration emitted ~20 000 lines because it materialised every custom `PolicyDefinition` the library shipped. Pruning to only-referenced definitions drops the default render to ~3 500 lines (139 resources: 12 MGs, 4 custom defs, 123 assignments). The remaining bulk is intrinsic to the ALZ archetype matrix — the `landing_zones` archetype alone has 53 assignments.
+
+### Chaining via CEL refs (unchanged)
+
+Every dependency edge is still an explicit CEL ref the renderer emits, so kro infers reconciliation order without any `dependsOn`:
+
+- child MG `parentManagementGroupId` → parent MG `${...status.atProvider.id}`
+- assignment `managementGroupId` → its MG
+- assignment `policyDefinitionId` → custom `PolicyDefinition` CR (when the resolved upstream id matches a vendored custom def)
+- custom `PolicyDefinition` `managementGroupId` → intermediate-root MG
+
+### Why a build-time renderer rather than runtime iteration in kro
+
+kro's `ResourceGraphDefinition` is a static set of resource templates with CEL refs; it cannot iterate at reconcile time over a user-supplied list to materialise N resources, nor can it read external library JSON. The renderer is therefore the smallest place to put the abstraction. The runtime stays kro + Crossplane with reconciliation-first semantics — only the authoring surface changes.
+
+### Trait alignment
+
+This iteration does not alter the trait-spec alignment table above. It strengthens:
+
+- **trait 2** (dependency-DAG planning): every edge in the rendered graph is an explicit CEL ref, including assignment → definition edges for custom defs in any vendored library, not just upstream.
+- **trait 4** (declarative-first authoring): the authoring surface is a small declarative file mirroring the Terraform model; iteration is owned by the renderer, not by the user.
+- **trait 5** (cloud-agnostic core): the renderer is ALZ-specific, but the layered-library mechanism is generic enough that the same pattern could host a non-Azure equivalent if one existed.
+
+### Known limits / follow-ups
+
+- Custom policy set definitions (initiatives) are not vendored; assignments that target them produce a warning and pass the placeholder ARM id through. Adding initiatives is a mechanical extension: walk `policy_set_definitions/` and emit `PolicySetDefinition` CRs, then update the policy-id-resolution logic.
+- Inline custom policy assignments / definitions (writing brand-new policy rules in `landingzone.yaml`) are not supported. To add new policies, put them in one of the configured libraries.
+- The renderer uses anonymous GitHub API calls (60 req/h). For frequent re-renders, the renderer should accept `GITHUB_TOKEN` from the environment — currently it does not.
 
 ## Out-of-scope (deliberate)
 

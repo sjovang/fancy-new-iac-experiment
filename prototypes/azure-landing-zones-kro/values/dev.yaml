@@ -6,14 +6,9 @@ metadata:
   name: alz-dev
 spec:
   # Tenant root MG id (typically the tenant id, e.g. 00000000-0000-0000-0000-000000000000).
-  rootParentId: "00000000-0000-0000-0000-000000000000"
+  parentResourceId: "00000000-0000-0000-0000-000000000000"
   # Every MG name in the hierarchy is prefixed with this; lets you stand up
   # multiple ALZ instances in the same tenant for testing.
   prefix: alz-dev
   # Default Azure region used by assignments that require a location.
   location: westeurope
-  # Per-environment values referenced from landingzone.yaml as ${inputs.<key>}.
-  # The renderer rewrites those to ${schema.spec.inputs.<key>} in the graph.
-  inputs:
-    ddosPlanId: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-connectivity/providers/Microsoft.Network/ddosProtectionPlans/alz-ddos"
-    logAnalyticsWorkspaceId: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-management/providers/Microsoft.OperationalInsights/workspaces/alz-law"

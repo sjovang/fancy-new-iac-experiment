@@ -1,50 +1,52 @@
-# Archetype → assignment mapping
+# Architecture → archetype → assignment mapping
 
-Source: [`Azure-Landing-Zones-Library/platform/alz/archetype_definitions/`](https://github.com/Azure/Azure-Landing-Zones-Library/tree/main/platform/alz/archetype_definitions).
+Source: [`Azure-Landing-Zones-Library/platform/alz/architecture_definitions/`](https://github.com/Azure/Azure-Landing-Zones-Library/tree/main/platform/alz/architecture_definitions) and [`archetype_definitions/`](https://github.com/Azure/Azure-Landing-Zones-Library/tree/main/platform/alz/archetype_definitions).
 
-In the previous iteration of this prototype, this file enumerated a hand-curated subset of assignments. With the renderer-driven design, that information lives in two places:
+The prototype no longer encodes any of this matrix by hand. The renderer walks the merged library set:
 
-- **The upstream library** at `libraryRef` in `landingzone.yaml` defines the full archetype matrix (each archetype JSON lists which policy assignments apply to MGs of that archetype).
-- **`landingzone.yaml`** declares which of those assignments this deployment actually enables, by listing them under each MG's `policyAssignments:` field.
+- `architecture_definitions/<name>.alz_architecture_definition.json` defines the MG hierarchy and which archetypes each MG carries.
+- `archetype_definitions/<archetype>.alz_archetype_definition.json` lists `policy_assignments`, `policy_definitions`, `policy_set_definitions`, `role_definitions`.
+- The MG's effective assignment list is the union of every archetype's `policy_assignments`, modulo `archetypeOverrides`, `policyAssignmentsToDisable`, and any custom archetypes you defined in `landingzone.yaml`.
 
-To extend the deployment you list more assignment names; you don't write code.
+## Default ALZ architecture (as rendered by this prototype)
 
-## Currently enabled assignments
+| MG               | Archetype(s) (upstream)        | Effective assignment count after rendering | Notes |
+|------------------|--------------------------------|---------------------------------------------|-------|
+| `alz`            | `root`                         | 0 | Empty upstream. |
+| `platform`       | `platform`                     | 40 | Mostly `Enforce-GR-*` initiatives — most target custom policy set definitions, which the renderer warns about and passes through unchanged. |
+| `connectivity`   | `connectivity`                 | 1 | `Enable-DDoS-VNET`. |
+| `identity`       | `identity`                     | 4 | `Deny-MgmtPorts-Internet`, `Deny-Public-IP`, `Deny-Subnet-Without-Nsg`, `Deploy-VM-Backup`. |
+| `management`     | `management`                   | 0 | Empty upstream. |
+| `security`       | `security`                     | 0 | Empty upstream. |
+| `landingzones`   | `landing_zones`                | 53 | Largest archetype. |
+| `corp`           | `corp`                         | 5 | `Audit-PeDnsZones`, `Deny-HybridNetworking`, `Deny-Public-Endpoints`, `Deny-Public-IP-On-NIC`, `Deploy-Private-DNS-Zones`. |
+| `online`         | `online`                       | 0 | Empty upstream. |
+| `local`          | `local`                        | 1 | `Enforce-ALDO-Services`. |
+| `sandbox`        | `sandbox`                      | 1 | `Enforce-ALZ-Sandbox` (custom initiative — out of scope). |
+| `decommissioned` | `decommissioned`               | 1 | `Enforce-ALZ-Decomm` (custom initiative — out of scope). |
 
-The matrix below is whatever `landingzone.yaml` declares — see the source for the live list. The values shown here are the defaults committed in the input file at the time this doc was last refreshed.
+Total: **123** assignments emitted from the default `alz` architecture, plus **4** referenced custom policy definitions and **12** management groups → 139 resources, ~3 500 lines.
 
-| MG               | Archetype (upstream)          | Assignments enabled in this deployment |
-|------------------|--------------------------------|----------------------------------------|
-| `alz`            | `root`                         | *(none in this deployment)*            |
-| `platform`       | `platform`                     | *(none in this deployment — extend with assignments from `policy_assignments/` that the upstream `platform` archetype lists)* |
-| `connectivity`   | `connectivity`                 | `Enable-DDoS-VNET`                     |
-| `identity`       | `identity`                     | `Deny-MgmtPorts-Internet`, `Deny-Public-IP` |
-| `management`     | `management`                   | *(empty in upstream archetype)*        |
-| `security`       | `security`                     | *(empty in upstream archetype)*        |
-| `landingzones`   | `landing_zones`                | `Deny-IP-forwarding`, `Deny-Storage-http` |
-| `corp`           | `corp`                         | `Audit-PeDnsZones`, `Deny-Public-IP-On-NIC` |
-| `online`         | `online`                       | *(empty in upstream archetype)*        |
-| `local`          | `local`                        | `Enforce-ALDO-Services`                |
-| `sandbox`        | `sandbox`                      | *(empty in upstream archetype)*        |
-| `decommissioned` | `decommissioned`               | *(empty — the upstream assignment targets a policy set definition, which is out of scope)* |
+## How the renderer resolves an assignment's policy id
 
-## Custom vs built-in policy definitions
+The renderer reads `properties.policyDefinitionId` from the merged library assignment JSON and matches one of three patterns:
 
-The renderer treats them differently:
-
-- **Custom definitions** (everything in `policy_definitions/*.alz_policy_definition.json` upstream — 149 files at the pinned ref) → one `PolicyDefinition` CR per file, scoped at the intermediate-root MG. Emitted regardless of whether any assignment uses them, so the upstream library is reflected verbatim and re-rendering after a library bump is a clean diff.
-- **Built-in definitions** referenced by an assignment's `policyDefinitionId` (e.g. `/providers/Microsoft.Authorization/policyDefinitions/<guid>`) → passed through as ARM ID strings; no CR needed.
-- **Built-in policy set definitions** (`policySetDefinitions/<guid>`) → also pass through as ARM ID strings, but custom policy set definitions (initiatives) shipped by the library are **not** vendored — that is out of scope.
-
-The renderer detects which case applies by parsing the upstream assignment's `policyDefinitionId` against three patterns:
-
-- `…/managementGroups/<placeholder>/providers/Microsoft.Authorization/policyDefinitions/<Name>` and `<Name>` is in the vendored set ⇒ CEL ref `${pd<Name>.status.atProvider.id}`.
-- `/providers/Microsoft.Authorization/policy(Set)?Definitions/<id>` ⇒ pass through.
-- Otherwise ⇒ warn and pass through (typically means the library wants a custom policy set definition that this prototype does not vendor).
+| Pattern | Action |
+|---------|--------|
+| `/providers/Microsoft.Management/managementGroups/<placeholder>/providers/Microsoft.Authorization/policyDefinitions/<Name>` and `<Name>` is in the merged `policy_definitions/` set | Emit a CEL ref `${pd<Name>.status.atProvider.id}` and add the custom `PolicyDefinition` CR to the graph. |
+| `/providers/Microsoft.Authorization/policy(Set)?Definitions/<id>` | Pass through as a literal ARM ID (built-in). |
+| `/providers/Microsoft.Management/managementGroups/<placeholder>/providers/Microsoft.Authorization/policySetDefinitions/<Name>` | Warn (custom initiatives are out of scope); pass through unchanged. |
+| Anything else | Warn; pass through. |
 
 ## Extending
 
-- New assignment on an existing MG → add one line to that MG's `policyAssignments` list in `landingzone.yaml`.
-- New MG → add a block under `managementGroups`.
-- Upstream library bump → bump `libraryRef`, re-render, review the diff.
-- Cover policy set definitions (initiatives) → extend the renderer to also walk `policy_set_definitions/*.json` and emit a `PolicySetDefinition` CR for each, then update the assignment id-resolution logic to recognise custom set-definition refs.
+| Goal | How |
+|------|-----|
+| Pin to a newer upstream library | Bump `libraries[0].ref` in `landingzone.yaml`, re-render. |
+| Add your own guardrails | Add a second `libraries` entry pointing at your repo. Your archetypes/assignments/definitions override the upstream ones by filename. |
+| Replace the `corp` archetype | Provide a `corp` entry under `archetypes:`. The renderer treats a same-named entry as a replacement. |
+| Tweak `Audit-PeDnsZones` parameters for `corp` only | Use `policyAssignmentsToModify.corp.Audit-PeDnsZones.parameters: {...}`. |
+| Drop one assignment from a library archetype | Use `archetypeOverrides.<archetype>.remove: [Assignment]`. |
+| Skip one assignment for one MG only | Use `policyAssignmentsToDisable.<mgName>: [Assignment]`. |
+| Add new MG with a custom archetype | Append to `managementGroups` and reference your archetype in `archetypes`. |
+| Cover initiatives (policy set definitions) | Extend the renderer to walk `policy_set_definitions/` and emit `PolicySetDefinition` CRs, then update the policy-id-resolution logic to recognise custom set-def refs. (Out of scope today.) |
